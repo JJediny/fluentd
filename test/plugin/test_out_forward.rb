@@ -488,6 +488,10 @@ class ForwardOutputTest < Test::Unit::TestCase
         @emit_streams ||= []
       end
 
+      def clear!
+        @emit_streams = []
+      end
+
       def emit_stream(tag, es)
         @emit_streams << [tag, es.to_a]
       end
