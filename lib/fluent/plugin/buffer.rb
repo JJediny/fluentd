@@ -168,36 +168,85 @@ module Fluent
 
       # metadata MUST have consistent object_id for each variation
       # data MUST be Array of serialized events
-      def emit(metadata, data, force: false)
-        return if data.size < 1
+      # metadata_and_data MUST be a hash of { metadata => data }
+      def emit(metadata_and_data, bulk: false)
+        return if metadata_and_data.size < 1
         raise BufferOverflowError unless storable?
 
-        stored = false
+        staged_size = 0
+        operated_chunks = []
 
-        # the case whole data can be stored in staged chunk: almost all emits will success
-        chunk = synchronize { @stage[metadata] ||= generate_chunk(metadata) }
-        original_bytesize = chunk.bytesize
-        chunk.synchronize do
-          begin
-            chunk.append(data)
-            if !chunk_size_over?(chunk) || force
-              chunk.commit
-              stored = true
-              @stage_size += (chunk.bytesize - original_bytesize)
-            else
-              chunk.rollback
+        begin
+          metadata_and_data.each do |metadata, data|
+            chunk = synchronize { @stage[metadata] ||= generate_chunk(metadata) }
+
+            chunk.synchronize do
+              original_bytesize = chunk.bytesize
+              begin
+                chunk.append(data)
+                if chunk_size_over?(chunk)
+                  chunk.rollback
+                else
+                  stored = true
+                  staged_size += (chunk.bytesize - original_bytesize)
+                  chunk.mon_enter # add lock to prevent to be committed/rollbacked from other threads
+                  operated_chunks << chunk
+                end
+              rescue
+                chunk.rollback
+                raise
+              end
             end
+            next if stored
+
+            # try step-by-step appending if data can't be stored into existing a chunk
+            chunks, appended_bytesize = emit_step_by_step(metadata, data)
+            operated_chunks.concat(chunks)
+            staged_size += appended_bytesize
+          end
+
+          first_chunk = operated_chunks.shift
+          # Following commits for other chunks also can finish successfully if the first commit operation
+          # finishes without any exceptions.
+          # In most cases, #commit just requires very small disk spaces, so major failure reason are
+          # permission errors, disk failures and other permanent(fatal) errors.
+          begin
+            first_chunk.commit
+            first_chunk.mon_exit
           rescue
-            chunk.rollback
+            operated_chunks.unshift(first_chunk)
             raise
           end
-        end
-        return if stored
 
-        # try step-by-step appending if data can't be stored into existing a chunk
-        emit_step_by_step(metadata, data)
+          errors = []
+          # Buffer plugin estimates there's no serious error cause: will commit for all chunks eigher way
+          operated_chunks.each do |chunk|
+            begin
+              chunk.commit
+              chunk.mon_exit
+            rescue => e
+              chunk.rollback
+              chunk.mon_exit
+              errors << e
+            end
+          end
+
+          @stage_size += staged_size
+
+          if errors.size > 0
+            log.warn "error occurs in committing chunks: only first one raised", errors: errors.map(&:class)
+            raise errors.first
+          end
+        rescue
+          operated_chunks.each do |chunk|
+            chunk.rollback rescue nil # nothing possible to do for #rollback failure
+            chunk.mon_exit rescue nil # this may raise ThreadError for chunks already committed
+          end
+          raise
+        end
       end
 
+      # TODO: merge into #emit w/ metadata_and_data support
       def emit_bulk(metadata, bulk, size)
         return if bulk.nil? || bulk.empty?
         raise BufferOverflowError unless storable?
@@ -361,6 +410,7 @@ module Fluent
         chunk.bytesize >= @chunk_bytes_limit || (@chunk_records_limit && chunk.size >= @chunk_records_limit)
       end
 
+      # TODO: add metadata_and_data support
       def emit_step_by_step(metadata, data)
         attempt_records = data.size / 3
 
