@@ -33,7 +33,13 @@ module Fluent
 
       def thread_wait_until_start
         until @_threads_mutex.synchronize{ @_threads.values.reduce(true){|r,t| r && t[:_fluentd_plugin_helper_thread_started] } }
-          ::Thread.pass
+          sleep 0.1
+        end
+      end
+
+      def thread_wait_until_stop
+        until @_threads_mutex.synchronize{ @_threads.values.reduce(true){|r,t| r && ![:_fluentd_plugin_helper_thread_running] } }
+          sleep 0.1
         end
       end
 
@@ -59,13 +65,13 @@ module Fluent
           begin
             yield
             thread_exit = true
-          rescue => e
+          rescue Exception => e
             log.warn "thread exited by unexpected error", plugin: self.class, title: title, error: e
             thread_exit = true
             raise
           ensure
             unless thread_exit
-              log.warn "thread doesn't exit correctly (killed or other reason)", plugin: self.class, title: title
+              log.warn "thread doesn't exit correctly (killed or other reason)", plugin: self.class, title: title, thread: ::Thread.current, error: $!
             end
             @_threads_mutex.synchronize do
               @_threads.delete(::Thread.current.object_id)
@@ -126,6 +132,7 @@ module Fluent
         super
         @_threads_mutex.synchronize{ @_threads.keys }.each do |obj_id|
           thread = @_threads[obj_id]
+          log.warn "killing existing thead", thread: thread
           thread.kill if thread
         end
         @_threads_mutex.synchronize{ @_threads.keys }.each do |obj_id|

@@ -42,10 +42,12 @@ require 'fileutils'
 require 'fluent/config/element'
 require 'fluent/log'
 require 'fluent/test'
+require 'fluent/test/helpers'
 require 'fluent/plugin/base'
 require 'fluent/log'
 require 'fluent/plugin_id'
 require 'fluent/plugin_helper'
+require 'fluent/msgpack_factory'
 require 'fluent/time'
 require 'serverengine'
 
@@ -66,17 +68,7 @@ unless defined?(Test::Unit::AssertionFailedError)
   end
 end
 
-def config_element(name = 'test', argument = '', params = {}, elements = [])
-  Fluent::Config::Element.new(name, argument, params, elements)
-end
-
-def event_time(str=nil)
-  if str
-    Fluent::EventTime.parse(str)
-  else
-    Fluent::EventTime.now
-  end
-end
+include Fluent::Test::Helpers
 
 def unused_port(num = 1)
   ports = []
@@ -91,6 +83,21 @@ def unused_port(num = 1)
     return ports.first
   else
     return *ports
+  end
+end
+
+def waiting(seconds, logs: nil, plugin: nil)
+  begin
+    Timeout.timeout(seconds) do
+      yield
+    end
+  rescue Timeout::Error
+    if logs
+      STDERR.print(*logs)
+    elsif plugin
+      STDERR.print(*plugin.log.out.logs)
+    end
+    raise
   end
 end
 

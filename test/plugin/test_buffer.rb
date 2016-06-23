@@ -13,21 +13,26 @@ module FluentPluginBufferTest
     include Fluent::PluginId
     include Fluent::PluginLoggerMixin
   end
+  class DummyMemoryChunkError < StandardError; end
   class DummyMemoryChunk < Fluent::Plugin::Buffer::MemoryChunk
     attr_reader :append_count, :rollbacked, :closed, :purged
+    attr_accessor :failing
     def initialize(metadata)
       super
       @append_count = 0
       @rollbacked = false
       @closed = false
       @purged = false
+      @failing = false
     end
     def append(data)
       @append_count += 1
+      raise DummyMemoryChunkError if @failing
       super
     end
     def concat(data, size)
       @append_count += 1
+      raise DummyMemoryChunkError if @failing
       super
     end
     def rollback
@@ -117,16 +122,16 @@ class BufferTest < Test::Unit::TestCase
     end
 
     test 'chunk bytes limit is 8MB, and total bytes limit is 512MB' do
-      assert_equal 8*1024*1024, @p.chunk_bytes_limit
-      assert_equal 512*1024*1024, @p.total_bytes_limit
+      assert_equal 8*1024*1024, @p.chunk_limit_size
+      assert_equal 512*1024*1024, @p.total_limit_size
     end
 
     test 'chunk records limit is ignored in default' do
       assert_nil @p.chunk_records_limit
     end
 
-    test '#storable? checks total size of staged and enqueued(includes dequeued chunks) against total_bytes_limit' do
-      assert_equal 512*1024*1024, @p.total_bytes_limit
+    test '#storable? checks total size of staged and enqueued(includes dequeued chunks) against total_limit_size' do
+      assert_equal 512*1024*1024, @p.total_limit_size
       assert_equal 0, @p.stage_size
       assert_equal 0, @p.queue_size
       assert @p.storable?
@@ -234,7 +239,7 @@ class BufferTest < Test::Unit::TestCase
 
     test '#new_metadata creates metadata instance without inserting metadata_list' do
       assert_equal [@dm2,@dm3,@dm0,@dm1], @p.metadata_list
-      m = @p.new_metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
+      _m = @p.new_metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
       assert_equal [@dm2,@dm3,@dm0,@dm1], @p.metadata_list
     end
 
@@ -242,7 +247,7 @@ class BufferTest < Test::Unit::TestCase
       assert_equal [@dm2,@dm3,@dm0,@dm1], @p.metadata_list
 
       m = @p.new_metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
-      mx = @p.add_metadata(m)
+      _mx = @p.add_metadata(m)
       assert_equal [@dm2,@dm3,@dm0,@dm1,m], @p.metadata_list
       assert_equal m.object_id, m.object_id
 
@@ -278,7 +283,7 @@ class BufferTest < Test::Unit::TestCase
     test '#queued? returns queue has any chunks or not without arguments' do
       assert @p.queued?
 
-      @p.queue.reject!{|c| true }
+      @p.queue.reject!{|_c| true }
       assert !@p.queued?
     end
 
@@ -495,30 +500,30 @@ class BufferTest < Test::Unit::TestCase
       assert{ qchunks.all?{ |c| c.purged } }
     end
 
-    test '#emit returns immediately if argument data is empty array' do
+    test '#write returns immediately if argument data is empty array' do
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
 
       m = @p.metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
 
-      @p.emit(m, [])
+      @p.write({m => []})
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
     end
 
-    test '#emit raises BufferOverflowError if buffer is not storable' do
+    test '#write raises BufferOverflowError if buffer is not storable' do
       @p.stage_size = 256 * 1024 * 1024
       @p.queue_size = 256 * 1024 * 1024
 
       m = @p.metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
 
       assert_raise Fluent::Plugin::Buffer::BufferOverflowError do
-        @p.emit(m, ["x" * 256])
+        @p.write({m => ["x" * 256]})
       end
     end
 
-    test '#emit stores data into an existing chunk with metadata specified' do
+    test '#write stores data into an existing chunk with metadata specified' do
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
 
@@ -527,7 +532,7 @@ class BufferTest < Test::Unit::TestCase
 
       assert_equal 1, @p.stage[@dm3].append_count
 
-      @p.emit(@dm3, ["x" * 256, "y" * 256, "z" * 256])
+      @p.write({@dm3 => ["x" * 256, "y" * 256, "z" * 256]})
 
       assert_equal 2, @p.stage[@dm3].append_count
       assert_equal (dm3data + ("x" * 256) + ("y" * 256) + ("z" * 256)), @p.stage[@dm3].read
@@ -537,7 +542,7 @@ class BufferTest < Test::Unit::TestCase
       assert_equal [@dm2,@dm3], @p.stage.keys
     end
 
-    test '#emit creates new chunk and store data into it if there are no chunks for specified metadata' do
+    test '#write creates new chunk and store data into it if there are no chunks for specified metadata' do
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
 
@@ -545,7 +550,7 @@ class BufferTest < Test::Unit::TestCase
 
       m = @p.metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
 
-      @p.emit(m, ["x" * 256, "y" * 256, "z" * 256])
+      @p.write({m => ["x" * 256, "y" * 256, "z" * 256]})
 
       assert_equal 1, @p.stage[m].append_count
       assert_equal ("x" * 256 + "y" * 256 + "z" * 256), @p.stage[m].read
@@ -555,8 +560,9 @@ class BufferTest < Test::Unit::TestCase
       assert_equal [@dm2,@dm3,m], @p.stage.keys
     end
 
-    test '#emit tries to enqueue and store data into a new chunk if existing chunk is full' do
-      assert_equal 8 * 1024 * 1024, @p.chunk_bytes_limit
+    test '#write tries to enqueue and store data into a new chunk if existing chunk is full' do
+      assert_equal 8 * 1024 * 1024, @p.chunk_limit_size
+      assert_equal 0.95, @p.chunk_full_threshold
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
@@ -564,32 +570,31 @@ class BufferTest < Test::Unit::TestCase
       m = @p.metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
 
       row = "x" * 1024 * 1024
-      @p.emit(m, [row] * 8)
+      small_row = "x" * 1024 * 512
+      @p.write({m => [row] * 7 + [small_row]})
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3,m], @p.stage.keys
       assert_equal 1, @p.stage[m].append_count
 
-      prev_stage_size = @p.stage_size
-
-      @p.emit(m, [row])
+      @p.write({m => [row]})
 
       assert_equal [@dm0,@dm1,@dm1,m], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3,m], @p.stage.keys
       assert_equal 1, @p.stage[m].append_count
       assert_equal 1024*1024, @p.stage[m].bytesize
-      assert_equal 3, @p.queue.last.append_count # 1 -> emit (2) -> emit_step_by_step (3)
+      assert_equal 3, @p.queue.last.append_count # 1 -> write (2) -> write_step_by_step (3)
       assert @p.queue.last.rollbacked
     end
 
-    test '#emit rollbacks if commit raises errors' do
+    test '#write rollbacks if commit raises errors' do
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
 
       m = @p.metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
 
       row = "x" * 1024
-      @p.emit(m, [row] * 8)
+      @p.write({m => [row] * 8})
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3,m], @p.stage.keys
@@ -604,7 +609,7 @@ class BufferTest < Test::Unit::TestCase
       end
 
       assert_raise "yay" do
-        @p.emit(m, [row])
+        @p.write({m => [row]})
       end
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
@@ -615,30 +620,31 @@ class BufferTest < Test::Unit::TestCase
       assert_equal row * 8, target_chunk.read
     end
 
-    test '#emit_bulk returns immediately if argument data is nil or empty string' do
+    test '#write w/ bulk returns immediately if argument data is nil or empty string' do
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
 
       m = @p.metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
 
-      @p.emit_bulk(m, '', 0)
+      @p.write({}, bulk: true)
+      @p.write({m => ['', 0]}, bulk: true)
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
     end
 
-    test '#emit_bulk raises BufferOverflowError if buffer is not storable' do
+    test '#write w/ bulk raises BufferOverflowError if buffer is not storable' do
       @p.stage_size = 256 * 1024 * 1024
       @p.queue_size = 256 * 1024 * 1024
 
       m = @p.metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
 
       assert_raise Fluent::Plugin::Buffer::BufferOverflowError do
-        @p.emit_bulk(m, "x" * 256, 1)
+        @p.write({m => ["x" * 256, 1]}, bulk: true)
       end
     end
 
-    test '#emit_bulk stores data into an existing chunk with metadata specified' do
+    test '#write w/ bulk stores data into an existing chunk with metadata specified' do
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
 
@@ -647,7 +653,7 @@ class BufferTest < Test::Unit::TestCase
 
       assert_equal 1, @p.stage[@dm3].append_count
 
-      @p.emit_bulk(@dm3, ("x"*256 + "y"*256 + "z"*256), 3)
+      @p.write({@dm3 => [("x"*256 + "y"*256 + "z"*256), 3]}, bulk: true)
 
       assert_equal 2, @p.stage[@dm3].append_count
       assert_equal (dm3data + ("x" * 256) + ("y" * 256) + ("z" * 256)), @p.stage[@dm3].read
@@ -657,8 +663,8 @@ class BufferTest < Test::Unit::TestCase
       assert_equal [@dm2,@dm3], @p.stage.keys
     end
 
-    test '#emit_bulk creates new chunk and store data into it if there are not chunks for specified metadata' do
-      assert_equal 8 * 1024 * 1024, @p.chunk_bytes_limit
+    test '#write w/ bulk creates new chunk and store data into it if there are not chunks for specified metadata' do
+      assert_equal 8 * 1024 * 1024, @p.chunk_limit_size
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
@@ -667,15 +673,15 @@ class BufferTest < Test::Unit::TestCase
 
       row = "x" * 1024 * 1024
       row_half = "x" * 1024 * 512
-      @p.emit_bulk(m, row*7 + row_half, 8)
+      @p.write({m => [row*7 + row_half, 8]}, bulk: true)
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3,m], @p.stage.keys
       assert_equal 1, @p.stage[m].append_count
     end
 
-    test '#emit_bulk tries to enqueue and store data into a new chunk if existing chunk does not have space for bulk' do
-      assert_equal 8 * 1024 * 1024, @p.chunk_bytes_limit
+    test '#write w/ bulk tries to enqueue and store data into a new chunk if existing chunk does not have space for bulk' do
+      assert_equal 8 * 1024 * 1024, @p.chunk_limit_size
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
@@ -684,24 +690,24 @@ class BufferTest < Test::Unit::TestCase
 
       row = "x" * 1024 * 1024
       row_half = "x" * 1024 * 512
-      @p.emit_bulk(m, row*7 + row_half, 8)
+      @p.write({m => [row*7 + row_half, 8]}, bulk: true)
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3,m], @p.stage.keys
       assert_equal 1, @p.stage[m].append_count
 
-      @p.emit_bulk(m, row, 1)
+      @p.write({m => [row, 1]}, bulk: true)
 
       assert_equal [@dm0,@dm1,@dm1,m], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3,m], @p.stage.keys
       assert_equal 1, @p.stage[m].append_count
       assert_equal 1024*1024, @p.stage[m].bytesize
-      assert_equal 2, @p.queue.last.append_count # 1 -> emit (2) -> rollback&enqueue
+      assert_equal 2, @p.queue.last.append_count # 1 -> write (2) -> rollback&enqueue
       assert @p.queue.last.rollbacked
     end
 
-    test '#emit_bulk enqueues chunk if it is already full after adding bulk data' do
-      assert_equal 8 * 1024 * 1024, @p.chunk_bytes_limit
+    test '#write w/ bulk enqueues chunk if it is already full after adding bulk data' do
+      assert_equal 8 * 1024 * 1024, @p.chunk_limit_size
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
@@ -709,14 +715,14 @@ class BufferTest < Test::Unit::TestCase
       m = @p.metadata(timekey: Time.parse('2016-04-11 16:40:00 +0000').to_i)
 
       row = "x" * 1024 * 1024
-      @p.emit_bulk(m, row * 8, 8)
+      @p.write({m => [row * 8, 8]}, bulk: true)
 
       assert_equal [@dm0,@dm1,@dm1,m], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
       assert_equal 1, @p.queue.last.append_count
     end
 
-    test '#emit_bulk rollbacks if commit raises errors' do
+    test '#write w/ bulk rollbacks if commit raises errors' do
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
 
@@ -724,7 +730,7 @@ class BufferTest < Test::Unit::TestCase
 
       row = "x" * 1024
       row_half = "x" * 512
-      @p.emit_bulk(m, row * 7 + row_half, 8)
+      @p.write({m => [row * 7 + row_half, 8]}, bulk: true)
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3,m], @p.stage.keys
@@ -739,7 +745,7 @@ class BufferTest < Test::Unit::TestCase
       end
 
       assert_raise "yay" do
-        @p.emit_bulk(m, row, 1)
+        @p.write({m => [row, 1]}, bulk: true)
       end
 
       assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
@@ -749,11 +755,57 @@ class BufferTest < Test::Unit::TestCase
       assert target_chunk.rollbacked
       assert_equal row * 7 + row_half, target_chunk.read
     end
+
+    test '#write writes many metadata and data pairs at once' do
+      assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
+      assert_equal [@dm2,@dm3], @p.stage.keys
+
+      row = "x" * 1024
+      @p.write({ @dm0 => [row, row, row], @dm1 => [row, row] }, bulk: false)
+
+      assert_equal [@dm2,@dm3,@dm0,@dm1], @p.stage.keys
+    end
+
+    test '#write does not commit on any chunks if any append operation on chunk fails' do
+      assert_equal [@dm0,@dm1,@dm1], @p.queue.map(&:metadata)
+      assert_equal [@dm2,@dm3], @p.stage.keys
+
+      row = "x" * 1024
+      @p.write({ @dm0 => [row, row, row], @dm1 => [row, row] }, bulk: false)
+
+      assert_equal [@dm2,@dm3,@dm0,@dm1], @p.stage.keys
+
+      dm2_size = @p.stage[@dm2].size
+      assert !@p.stage[@dm2].rollbacked
+      dm3_size = @p.stage[@dm3].size
+      assert !@p.stage[@dm3].rollbacked
+
+      assert{ @p.stage[@dm0].size == 3 }
+      assert !@p.stage[@dm0].rollbacked
+      assert{ @p.stage[@dm1].size == 2 }
+      assert !@p.stage[@dm1].rollbacked
+
+      @p.stage[@dm1].failing = true
+
+      assert_raise(FluentPluginBufferTest::DummyMemoryChunkError) do
+        @p.write({ @dm2 => [row], @dm3 => [row], @dm0 => [row, row, row], @dm1 => [row, row] }, bulk: false)
+      end
+
+      assert{ @p.stage[@dm2].size == dm2_size }
+      assert @p.stage[@dm2].rollbacked
+      assert{ @p.stage[@dm3].size == dm3_size }
+      assert @p.stage[@dm3].rollbacked
+
+      assert{ @p.stage[@dm0].size == 3 }
+      assert @p.stage[@dm0].rollbacked
+      assert{ @p.stage[@dm1].size == 2 }
+      assert @p.stage[@dm1].rollbacked
+    end
   end
 
   sub_test_case 'with configuration for test with lower limits' do
     setup do
-      @p = create_buffer({"chunk_bytes_limit" => 1024, "total_bytes_limit" => 10240})
+      @p = create_buffer({"chunk_limit_size" => 1024, "total_limit_size" => 10240})
       @dm0 = dm0 = create_metadata(Time.parse('2016-04-11 16:00:00 +0000').to_i, nil, nil)
       @dm1 = dm1 = create_metadata(Time.parse('2016-04-11 16:10:00 +0000').to_i, nil, nil)
       @dm2 = dm2 = create_metadata(Time.parse('2016-04-11 16:20:00 +0000').to_i, nil, nil)
@@ -791,7 +843,7 @@ class BufferTest < Test::Unit::TestCase
       assert @p.storable?
 
       dm3 = @p.metadata(timekey: @dm3.timekey)
-      @p.emit(dm3, ["c" * 128])
+      @p.write({dm3 => ["c" * 128]})
 
       assert_equal 10240, (@p.stage_size + @p.queue_size)
       assert !@p.storable?
@@ -819,25 +871,26 @@ class BufferTest < Test::Unit::TestCase
       c2 = create_chunk(m, ["a" * 128] * 8)
       assert @p.chunk_size_full?(c2)
 
-      c3 = create_chunk(m, ["a" * 128] * 7 + ["a" * 127])
+      assert_equal 0.95, @p.chunk_full_threshold
+      c3 = create_chunk(m, ["a" * 128] * 6 + ["a" * 64])
       assert !@p.chunk_size_full?(c3)
     end
 
-    test '#emit raises BufferChunkOverflowError if incoming data is bigger than chunk bytes limit' do
+    test '#write raises BufferChunkOverflowError if incoming data is bigger than chunk bytes limit' do
       assert_equal [@dm0,@dm0,@dm0,@dm0,@dm0,@dm1,@dm1,@dm1,@dm1], @p.queue.map(&:metadata)
       assert_equal [@dm2,@dm3], @p.stage.keys
 
       m = create_metadata(Time.parse('2016-04-11 16:40:00 +0000').to_i)
 
       assert_raise Fluent::Plugin::Buffer::BufferChunkOverflowError do
-        @p.emit(m, ["a" * 128] * 9)
+        @p.write({m => ["a" * 128] * 9})
       end
     end
   end
 
   sub_test_case 'with configuration includes chunk_records_limit' do
     setup do
-      @p = create_buffer({"chunk_bytes_limit" => 1024, "total_bytes_limit" => 10240, "chunk_records_limit" => 6})
+      @p = create_buffer({"chunk_limit_size" => 1024, "total_limit_size" => 10240, "chunk_records_limit" => 6})
       @dm0 = dm0 = create_metadata(Time.parse('2016-04-11 16:00:00 +0000').to_i, nil, nil)
       @dm1 = dm1 = create_metadata(Time.parse('2016-04-11 16:10:00 +0000').to_i, nil, nil)
       @dm2 = dm2 = create_metadata(Time.parse('2016-04-11 16:20:00 +0000').to_i, nil, nil)
@@ -895,7 +948,7 @@ class BufferTest < Test::Unit::TestCase
 
   sub_test_case 'with configuration includes queue_length_limit' do
     setup do
-      @p = create_buffer({"chunk_bytes_limit" => 1024, "total_bytes_limit" => 10240, "queue_length_limit" => 5})
+      @p = create_buffer({"chunk_limit_size" => 1024, "total_limit_size" => 10240, "queue_length_limit" => 5})
       @dm0 = dm0 = create_metadata(Time.parse('2016-04-11 16:00:00 +0000').to_i, nil, nil)
       @dm1 = dm1 = create_metadata(Time.parse('2016-04-11 16:10:00 +0000').to_i, nil, nil)
       @dm2 = dm2 = create_metadata(Time.parse('2016-04-11 16:20:00 +0000').to_i, nil, nil)
@@ -919,9 +972,9 @@ class BufferTest < Test::Unit::TestCase
     end
 
     test '#configure will overwrite standard configuration if queue_length_limit' do
-      assert_equal 1024, @p.chunk_bytes_limit
+      assert_equal 1024, @p.chunk_limit_size
       assert_equal 5, @p.queue_length_limit
-      assert_equal (1024*5), @p.total_bytes_limit
+      assert_equal (1024*5), @p.total_limit_size
     end
   end
 

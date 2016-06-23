@@ -33,15 +33,17 @@ module Fluent
 
       MINIMUM_APPEND_ATTEMPT_RECORDS = 10
 
-      DEFAULT_CHUNK_BYTES_LIMIT =   8 * 1024 * 1024 # 8MB
-      DEFAULT_TOTAL_BYTES_LIMIT = 512 * 1024 * 1024 # 512MB, same with v0.12 (BufferedOutput + buf_memory: 64 x 8MB)
+      DEFAULT_CHUNK_LIMIT_SIZE =   8 * 1024 * 1024 # 8MB
+      DEFAULT_TOTAL_LIMIT_SIZE = 512 * 1024 * 1024 # 512MB, same with v0.12 (BufferedOutput + buf_memory: 64 x 8MB)
+
+      DEFAULT_CHUNK_FULL_THRESHOLD = 0.95
 
       configured_in :buffer
 
-      # TODO: system total buffer bytes limit by SystemConfig
+      # TODO: system total buffer limit size in bytes by SystemConfig
 
-      config_param :chunk_bytes_limit, :size, default: DEFAULT_CHUNK_BYTES_LIMIT
-      config_param :total_bytes_limit, :size, default: DEFAULT_TOTAL_BYTES_LIMIT
+      config_param :chunk_limit_size, :size, default: DEFAULT_CHUNK_LIMIT_SIZE
+      config_param :total_limit_size, :size, default: DEFAULT_TOTAL_LIMIT_SIZE
 
       # If user specify this value and (chunk_size * queue_length) is smaller than total_size,
       # then total_size is automatically configured to that value
@@ -49,6 +51,9 @@ module Fluent
 
       # optional new limitations
       config_param :chunk_records_limit, :integer, default: nil
+
+      # if chunk size (or records) is 95% or more after #write, then that chunk will be enqueued
+      config_param :chunk_full_threshold, :float, default: DEFAULT_CHUNK_FULL_THRESHOLD
 
       Metadata = Struct.new(:timekey, :tag, :variables)
 
@@ -59,8 +64,8 @@ module Fluent
       def initialize
         super
 
-        @chunk_bytes_limit = nil
-        @total_bytes_limit = nil
+        @chunk_limit_size = nil
+        @total_limit_size = nil
         @queue_length_limit = nil
         @chunk_records_limit = nil
 
@@ -81,7 +86,7 @@ module Fluent
         super
 
         unless @queue_length_limit.nil?
-          @total_bytes_limit = @chunk_bytes_limit * @queue_length_limit
+          @total_limit_size = @chunk_limit_size * @queue_length_limit
         end
       end
 
@@ -123,7 +128,7 @@ module Fluent
       end
 
       def storable?
-        @total_bytes_limit > @stage_size + @queue_size
+        @total_limit_size > @stage_size + @queue_size
       end
 
       ## TODO: for back pressure feature
@@ -168,77 +173,66 @@ module Fluent
 
       # metadata MUST have consistent object_id for each variation
       # data MUST be Array of serialized events
-      def emit(metadata, data, force: false)
-        return if data.size < 1
-        raise BufferOverflowError unless storable?
+      # metadata_and_data MUST be a hash of { metadata => data }
+      def write(metadata_and_data, bulk: false, enqueue: false)
+        return if metadata_and_data.size < 1
+        raise BufferOverflowError, "buffer space has too many data" unless storable?
 
-        stored = false
+        staged_bytesize = 0
+        operated_chunks = []
 
-        # the case whole data can be stored in staged chunk: almost all emits will success
-        chunk = synchronize { @stage[metadata] ||= generate_chunk(metadata) }
-        original_bytesize = chunk.bytesize
-        chunk.synchronize do
-          begin
-            chunk.append(data)
-            if !chunk_size_over?(chunk) || force
-              chunk.commit
-              stored = true
-              @stage_size += (chunk.bytesize - original_bytesize)
-            else
-              chunk.rollback
+        begin
+          metadata_and_data.each do |metadata, data|
+            write_once(metadata, data, bulk: bulk) do |chunk, adding_bytesize|
+              chunk.mon_enter # add lock to prevent to be committed/rollbacked from other threads
+              operated_chunks << chunk
+              staged_bytesize += adding_bytesize
             end
+          end
+
+          return if operated_chunks.empty?
+
+          first_chunk = operated_chunks.shift
+          # Following commits for other chunks also can finish successfully if the first commit operation
+          # finishes without any exceptions.
+          # In most cases, #commit just requires very small disk spaces, so major failure reason are
+          # permission errors, disk failures and other permanent(fatal) errors.
+          begin
+            first_chunk.commit
+            enqueue_chunk(first_chunk.metadata) if enqueue || chunk_size_full?(first_chunk)
+            first_chunk.mon_exit
           rescue
-            chunk.rollback
+            operated_chunks.unshift(first_chunk)
             raise
           end
-        end
-        return if stored
 
-        # try step-by-step appending if data can't be stored into existing a chunk
-        emit_step_by_step(metadata, data)
-      end
-
-      def emit_bulk(metadata, bulk, size)
-        return if bulk.nil? || bulk.empty?
-        raise BufferOverflowError unless storable?
-
-        stored = false
-        synchronize do # critical section for buffer (stage/queue)
-          until stored
-            chunk = @stage[metadata]
-            unless chunk
-              chunk = @stage[metadata] = generate_chunk(metadata)
-            end
-
-            chunk.synchronize do # critical section for chunk (chunk append/commit/rollback)
-              begin
-                empty_chunk = chunk.empty?
-                chunk.concat(bulk, size)
-
-                if chunk_size_over?(chunk)
-                  if empty_chunk
-                    log.warn "chunk bytes limit exceeds for a bulk event stream: #{bulk.bytesize}bytes"
-                  else
-                    chunk.rollback
-                    enqueue_chunk(metadata)
-                    next
-                  end
-                end
-
-                chunk.commit
-                stored = true
-                @stage_size += bulk.bytesize
-                if chunk_size_full?(chunk)
-                  enqueue_chunk(metadata)
-                end
-              rescue
-                chunk.rollback
-                raise
-              end
+          errors = []
+          # Buffer plugin estimates there's no serious error cause: will commit for all chunks eigher way
+          operated_chunks.each do |chunk|
+            begin
+              chunk.commit
+              enqueue_chunk(chunk.metadata) if enqueue || chunk_size_full?(chunk)
+              chunk.mon_exit
+            rescue => e
+              chunk.rollback
+              chunk.mon_exit
+              errors << e
             end
           end
+          operated_chunks.clear if errors.empty?
+
+          @stage_size += staged_bytesize
+
+          if errors.size > 0
+            log.warn "error occurs in committing chunks: only first one raised", errors: errors.map(&:class)
+            raise errors.first
+          end
+        ensure
+          operated_chunks.each do |chunk|
+            chunk.rollback rescue nil # nothing possible to do for #rollback failure
+            chunk.mon_exit rescue nil # this may raise ThreadError for chunks already committed
+          end
         end
-        nil
       end
 
       def queued_records
@@ -354,68 +348,126 @@ module Fluent
       end
 
       def chunk_size_over?(chunk)
-        chunk.bytesize > @chunk_bytes_limit || (@chunk_records_limit && chunk.size > @chunk_records_limit)
+        chunk.bytesize > @chunk_limit_size || (@chunk_records_limit && chunk.size > @chunk_records_limit)
       end
 
       def chunk_size_full?(chunk)
-        chunk.bytesize >= @chunk_bytes_limit || (@chunk_records_limit && chunk.size >= @chunk_records_limit)
+        chunk.bytesize >= @chunk_limit_size * @chunk_full_threshold || (@chunk_records_limit && chunk.size >= @chunk_records_limit * @chunk_full_threshold)
       end
 
-      def emit_step_by_step(metadata, data)
-        attempt_records = data.size / 3
+      class ShouldRetry < StandardError; end
 
-        synchronize do # critical section for buffer (stage/queue)
-          while data.size > 0
-            if attempt_records < MINIMUM_APPEND_ATTEMPT_RECORDS
-              attempt_records = MINIMUM_APPEND_ATTEMPT_RECORDS
+      def write_once(metadata, data, bulk: false, &block)
+        return if !bulk && (data.nil? || data.empty?)
+        return if bulk && (data.empty? || data.first.nil? || data.first.empty?)
+
+        stored = false
+        adding_bytesize = nil
+
+        chunk = synchronize { @stage[metadata] ||= generate_chunk(metadata) }
+        enqueue_list = []
+
+        chunk.synchronize do
+          # retry this method if chunk is already queued (between getting chunk and entering critical section)
+          raise ShouldRetry unless chunk.staged?
+
+          empty_chunk = chunk.empty?
+
+          original_bytesize = chunk.bytesize
+          begin
+            if bulk
+              content, size = data
+              chunk.concat(content, size)
+            else
+              chunk.append(data)
             end
+            adding_bytesize = chunk.bytesize - original_bytesize
 
-            chunk = @stage[metadata]
-            unless chunk
-              chunk = @stage[metadata] = generate_chunk(metadata)
+            if chunk_size_over?(chunk)
+              if empty_chunk && bulk
+                log.warn "chunk bytes limit exceeds for a bulk event stream: #{bulk.bytesize}bytes"
+                stored = true
+              else
+                chunk.rollback
+              end
+            else
+              stored = true
             end
+          rescue
+            chunk.rollback
+            raise
+          end
 
-            chunk.synchronize do # critical section for chunk (chunk append/commit/rollback)
-              begin
-                empty_chunk = chunk.empty?
-                original_bytesize = chunk.bytesize
+          if stored
+            block.call(chunk, adding_bytesize)
+          elsif bulk
+            # this metadata might be enqueued already by other threads
+            # but #enqueue_chunk does nothing in such case
+            enqueue_list << metadata
+            raise ShouldRetry
+          end
+        end
 
-                attempt = data.slice(0, attempt_records)
-                chunk.append(attempt)
+        unless stored
+          # try step-by-step appending if data can't be stored into existing a chunk in non-bulk mode
+          write_step_by_step(metadata, data, data.size / 3, &block)
+        end
+      rescue ShouldRetry
+        enqueue_list.each do |m|
+          enqueue_chunk(m)
+        end
+        retry
+      end
 
-                if chunk_size_over?(chunk)
-                  chunk.rollback
+      def write_step_by_step(metadata, data, attempt_records, &block)
+        while data.size > 0
+          if attempt_records < MINIMUM_APPEND_ATTEMPT_RECORDS
+            attempt_records = MINIMUM_APPEND_ATTEMPT_RECORDS
+          end
 
-                  if attempt_records <= MINIMUM_APPEND_ATTEMPT_RECORDS
-                    if empty_chunk # record is too large even for empty chunk
-                      raise BufferChunkOverflowError, "minimum append butch exceeds chunk bytes limit"
-                    end
-                    # no more records for this chunk -> enqueue -> to be flushed
-                    enqueue_chunk(metadata) # `chunk` will be removed from stage
-                    attempt_records = data.size # fresh chunk may have enough space
-                  else
-                    # whole data can be processed by twice operation
-                    #  ( by using apttempt /= 2, 3 operations required for odd numbers of data)
-                    attempt_records = (attempt_records / 2) + 1
+          chunk = synchronize{ @stage[metadata] ||= generate_chunk(metadata) }
+          chunk.synchronize do # critical section for chunk (chunk append/commit/rollback)
+            raise ShouldRetry unless chunk.staged?
+            begin
+              empty_chunk = chunk.empty?
+              original_bytesize = chunk.bytesize
+
+              attempt = data.slice(0, attempt_records)
+              chunk.append(attempt)
+              adding_bytesize = (chunk.bytesize - original_bytesize)
+
+              if chunk_size_over?(chunk)
+                chunk.rollback
+
+                if attempt_records <= MINIMUM_APPEND_ATTEMPT_RECORDS
+                  if empty_chunk # record is too large even for empty chunk
+                    raise BufferChunkOverflowError, "minimum append butch exceeds chunk bytes limit"
                   end
-
-                  next
+                  # no more records for this chunk -> enqueue -> to be flushed
+                  enqueue_chunk(metadata) # `chunk` will be removed from stage
+                  attempt_records = data.size # fresh chunk may have enough space
+                else
+                  # whole data can be processed by twice operation
+                  #  ( by using apttempt /= 2, 3 operations required for odd numbers of data)
+                  attempt_records = (attempt_records / 2) + 1
                 end
 
-                chunk.commit
-                @stage_size += (chunk.bytesize - original_bytesize)
-                data.slice!(0, attempt_records)
-                # same attempt size
-                nil # discard return value of data.slice!() immediately
-              rescue
-                chunk.rollback
-                raise
+                next
               end
+
+              block.call(chunk, adding_bytesize)
+              data.slice!(0, attempt_records)
+              # same attempt size
+              nil # discard return value of data.slice!() immediately
+            rescue
+              chunk.rollback
+              raise
             end
           end
         end
-        nil
-      end # emit_step_by_step
+      rescue ShouldRetry
+        retry
+      end # write_step_by_step
     end
   end
 end

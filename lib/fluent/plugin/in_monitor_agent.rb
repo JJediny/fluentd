@@ -235,6 +235,8 @@ module Fluent
     end
 
     def start
+      super
+
       log.debug "listening monitoring http server on http://#{@bind}:#{@port}/api/plugins"
       @srv = WEBrick::HTTPServer.new({
           BindAddress: @bind,
@@ -290,12 +292,14 @@ module Fluent
         @thread_for_emit.join
         @thread_for_emit = nil
       end
+
+      super
     end
 
     MONITOR_INFO = {
-      'output_plugin' => 'is_a?(::Fluent::Output)', # deprecated. Use plugin_category instead
-      'buffer_queue_length' => '@buffer.queue_size',
-      'buffer_total_queued_size' => '@buffer.total_queued_chunk_size',
+      'output_plugin' => 'is_a?(::Fluent::Plugin::Output)',
+      'buffer_queue_length' => '@buffer.queue.size',
+      'buffer_total_queued_size' => '@buffer.stage_size + @buffer.queue_size',
       'retry_count' => '@num_errors',
     }
 
@@ -364,7 +368,7 @@ module Fluent
     # multiple plugins could have the same type
     def plugins_info_by_type(type, opts={})
       array = all_plugins.select {|pe|
-        (pe.config['@type'] == type || pe.config['type'] == type) rescue nil
+        (pe.config['@type'] == type) rescue nil
       }
       array.map {|pe|
         get_monitor_info(pe, opts)
@@ -387,7 +391,7 @@ module Fluent
       # Common plugin information
       obj['plugin_id'] = pe.plugin_id
       obj['plugin_category'] = plugin_category(pe)
-      obj['type'] = pe.config['@type'] || pe.config['type']
+      obj['type'] = pe.config['@type']
       obj['config'] = pe.config if !opts.has_key?(:with_config) || opts[:with_config]
 
       # run MONITOR_INFO in plugins' instance context and store the info to obj
@@ -416,11 +420,11 @@ module Fluent
 
     def plugin_category(pe)
       case pe
-      when Fluent::Input
+      when Fluent::Plugin::Input
         'input'.freeze
-      when Fluent::Output
+      when Fluent::Plugin::Output, Fluent::Plugin::BareOutput
         'output'.freeze
-      when Fluent::Filter
+      when Fluent::Plugin::Filter
         'filter'.freeze
       else
         'unknown'.freeze

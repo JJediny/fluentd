@@ -55,6 +55,8 @@ module Fluent
     end
 
     def start
+      super
+
       @loop = Coolio::Loop.new
 
       socket_manager_path = ENV['SERVERENGINE_SOCKETMANAGER_PATH']
@@ -89,6 +91,8 @@ module Fluent
       @usock.close
       @thread.join
       @lsock.close
+
+      super
     end
 
     def listen(client)
@@ -229,7 +233,7 @@ module Fluent
         super(io)
 
         if io.is_a?(TCPSocket) # for unix domain socket support in the future
-          proto, port, host, addr = ( io.peeraddr rescue PEERADDR_FAILED )
+          _proto, port, host, addr = ( io.peeraddr rescue PEERADDR_FAILED )
           @source = "host: #{host}, addr: #{addr}, port: #{port}"
 
           opt = [1, linger_timeout].pack('I!I!')  # { int l_onoff; int l_linger; }
@@ -242,7 +246,7 @@ module Fluent
         @log.trace {
           begin
             remote_port, remote_addr = *Socket.unpack_sockaddr_in(@_io.getpeername)
-          rescue => e
+          rescue
             remote_port = nil
             remote_addr = nil
           end

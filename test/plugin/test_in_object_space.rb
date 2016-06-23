@@ -2,7 +2,20 @@ require_relative '../helper'
 require 'fluent/test'
 require 'fluent/plugin/in_object_space'
 
+require 'timeout'
+
 class ObjectSpaceInputTest < Test::Unit::TestCase
+  def waiting(seconds, instance)
+    begin
+      Timeout.timeout(seconds) do
+        yield
+      end
+    rescue Timeout::Error
+      STDERR.print(*instance.log.out.logs)
+      raise
+    end
+  end
+
   class FailObject
     def self.class
       raise "error"
@@ -33,11 +46,14 @@ class ObjectSpaceInputTest < Test::Unit::TestCase
   def test_emit
     d = create_driver
 
-    d.expected_emits_length = 2
-    d.run
+    d.run do
+      waiting(10, d.instance) do
+        sleep 0.5 until d.emit_streams.size > 3
+      end
+    end
 
     emits = d.emits
-    assert_equal true, emits.length > 0
+    assert{ emits.length > 0 }
 
     emits.each { |tag, time, record|
       assert_equal d.instance.tag, tag

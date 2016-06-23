@@ -32,16 +32,18 @@ module Fluent
       # to simulate implicit 'attr_accessor' by config_param / config_section and its value by config_set_default
       proxy = self.class.merged_configure_proxy
       proxy.params.keys.each do |name|
+        next if name.to_s.start_with?('@')
         if proxy.defaults.has_key?(name)
           instance_variable_set("@#{name}".to_sym, proxy.defaults[name])
         end
       end
       proxy.sections.keys.each do |name|
+        next if name.to_s.start_with?('@')
         subproxy = proxy.sections[name]
         if subproxy.multi?
-          instance_variable_set("@#{subproxy.param_name}".to_sym, [])
+          instance_variable_set("@#{subproxy.variable_name}".to_sym, [])
         else
-          instance_variable_set("@#{subproxy.param_name}".to_sym, nil)
+          instance_variable_set("@#{subproxy.variable_name}".to_sym, nil)
         end
       end
     end
@@ -49,7 +51,7 @@ module Fluent
     def configure(conf)
       @config = conf
 
-      logger = self.respond_to?(:log) ? log : $log
+      logger = self.respond_to?(:log) ? log : (defined?($log) ? $log : nil)
       proxy = self.class.merged_configure_proxy
       conf.corresponding_proxies << proxy
 
@@ -67,8 +69,9 @@ module Fluent
       @config_root_section = root
 
       root.instance_eval{ @params.keys }.each do |param_name|
+        next if param_name.to_s.start_with?('@')
         varname = "@#{param_name}".to_sym
-        if (! root[param_name].nil?) || instance_variable_get(varname).nil?
+        if (! root[param_name].nil?) || (instance_variable_defined?(varname) && instance_variable_get(varname).nil?)
           instance_variable_set(varname, root[param_name])
         end
       end
@@ -116,7 +119,7 @@ module Fluent
         map = configure_proxy_map
         unless map[mod_name]
           type_lookup = ->(type) { Fluent::Configurable.lookup_type(type) }
-          proxy = Fluent::Config::ConfigureProxy.new(mod_name, required: true, multi: false, type_lookup: type_lookup)
+          proxy = Fluent::Config::ConfigureProxy.new(mod_name, root: true, required: true, multi: false, type_lookup: type_lookup)
           map[mod_name] = proxy
         end
         map[mod_name]
@@ -128,7 +131,8 @@ module Fluent
 
       def config_param(name, type = nil, **kwargs, &block)
         configure_proxy(self.name).config_param(name, type, **kwargs, &block)
-        attr_accessor name
+        # reserved names '@foo' are invalid as attr_accessor name
+        attr_accessor(name) unless kwargs[:skip_accessor] || Fluent::Config::Element::RESERVED_PARAMETERS.include?(name.to_s)
       end
 
       def config_set_default(name, defval)
@@ -141,7 +145,10 @@ module Fluent
 
       def config_section(name, **kwargs, &block)
         configure_proxy(self.name).config_section(name, **kwargs, &block)
-        attr_accessor configure_proxy(self.name).sections[name].param_name
+        variable_name = configure_proxy(self.name).sections[name].variable_name
+        unless self.respond_to?(variable_name)
+          attr_accessor variable_name
+        end
       end
 
       def desc(description)

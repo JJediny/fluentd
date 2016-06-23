@@ -147,6 +147,39 @@ class HttpInputTest < Test::Unit::TestCase
 
   end
 
+  def test_json_with_add_remote_addr_given_x_forwarded_for
+    d = create_driver(CONFIG + "add_remote_addr true")
+    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+
+    d.expect_emit "tag1", time, {"REMOTE_ADDR"=>"129.78.138.66", "a"=>1}
+    d.expect_emit "tag2", time, {"REMOTE_ADDR"=>"129.78.138.66", "a"=>1}
+
+    d.run do
+      d.expected_emits.each {|tag,_time,record|
+        res = post("/#{tag}", {"json"=>record.to_json, "time"=>_time.to_s}, {"X-Forwarded-For"=>"129.78.138.66, 127.0.0.1"})
+        assert_equal "200", res.code
+      }
+    end
+
+  end
+
+  def test_multi_json_with_add_remote_addr_given_x_forwarded_for
+    d = create_driver(CONFIG + "add_remote_addr true")
+
+    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    events = [{"a"=>1},{"a"=>2}]
+    tag = "tag1"
+
+    d.expect_emit "tag1", time, {"REMOTE_ADDR"=>"129.78.138.66", "a"=>1}
+    d.expect_emit "tag1", time, {"REMOTE_ADDR"=>"129.78.138.66", "a"=>2}
+
+    d.run do
+      res = post("/#{tag}", {"json"=>events.to_json, "time"=>time.to_s}, {"X-Forwarded-For"=>"129.78.138.66, 127.0.0.1"})
+      assert_equal "200", res.code
+    end
+
+  end
+
   def test_multi_json_with_add_http_headers
     d = create_driver(CONFIG + "add_http_headers true")
 
@@ -251,7 +284,7 @@ class HttpInputTest < Test::Unit::TestCase
         body = record.map { |k, v|
           v.to_s
         }.join(':')
-        res = post("/#{tag}?time=#{_time.to_s}", body)
+        res = post("/#{tag}?time=#{_time.to_s}", body, {'Content-Type' => 'application/octet-stream'})
         assert_equal "200", res.code
       }
     end
@@ -273,7 +306,7 @@ class HttpInputTest < Test::Unit::TestCase
     d.run do
       d.expected_emits.each { |tag, _time, record|
         body = record.map { |k, v| v }.to_csv
-        res = post("/#{tag}?time=#{_time.to_s}", body)
+        res = post("/#{tag}?time=#{_time.to_s}", body, {'Content-Type' => 'text/comma-separated-values'})
         assert_equal "200", res.code
       }
     end
@@ -302,56 +335,44 @@ class HttpInputTest < Test::Unit::TestCase
     d = create_driver(CONFIG + "cors_allow_origins [\"http://foo.com\"]")
     assert_equal ["http://foo.com"], d.instance.cors_allow_origins
 
-    test_in_http_cros_allowed = nil
-    acao = nil
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
-    begin
-      d.run do
-        Net::HTTP.start("127.0.0.1", PORT) do |http|
-          req = Net::HTTP::Post.new("/foo/bar", {"Origin" => "http://foo.com"})
-          res = http.request(req)
+    d.expect_emit "tag1", time, {"a"=>1}
+    d.expect_emit "tag2", time, {"a"=>1}
 
-          acao = res["Access-Control-Allow-Origin"]
-        end
-      end
-      test_in_http_cros_allowed = true
-    rescue
-      test_in_http_cros_allowed = false
+    d.run do
+      d.expected_emits.each {|tag,_time,record|
+        res = post("/#{tag}", {"json"=>record.to_json, "time"=>_time.to_s}, {"Origin"=>"http://foo.com"})
+        assert_equal "200", res.code
+        assert_equal "http://foo.com", res["Access-Control-Allow-Origin"]
+      }
     end
-
-    assert_equal true, test_in_http_cros_allowed
-    assert_equal "http://foo.com", acao
   end
 
   def test_cors_disallowed
     d = create_driver(CONFIG + "cors_allow_origins [\"http://foo.com\"]")
     assert_equal ["http://foo.com"], d.instance.cors_allow_origins
 
-    test_in_http_cros_disallowed = nil
-    response_code = nil
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
-    begin
-      d.run do
-        Net::HTTP.start("127.0.0.1", PORT) do |http|
-          req = Net::HTTP::Post.new("/foo/bar", {"Origin" => "http://bar.com"})
-          res = http.request(req)
+    d.expected_emits_length = 0
+    d.run do
+      res = post("/tag1", {"json"=>{"a"=>1}.to_json, "time"=>time.to_s}, {"Origin"=>"http://bar.com"})
+      assert_equal "403", res.code
 
-          response_code = res.code
-        end
-      end
-      test_in_http_cros_disallowed = true
-    rescue
-      test_in_http_cros_disallowed = false
+      res = post("/tag2", {"json"=>{"a"=>1}.to_json, "time"=>time.to_s}, {"Origin"=>"http://bar.com"})
+      assert_equal "403", res.code
     end
-
-    assert_equal true, test_in_http_cros_disallowed
-    assert_equal "403", response_code
   end
 
   $test_in_http_connection_object_ids = []
   $test_in_http_content_types = []
   $test_in_http_content_types_flag = false
   module ContentTypeHook
+    def initialize(*args)
+      @io_handler = nil
+      super
+    end
     def on_headers_complete(headers)
       super
       if $test_in_http_content_types_flag
@@ -402,8 +423,14 @@ class HttpInputTest < Test::Unit::TestCase
     http = Net::HTTP.new("127.0.0.1", PORT)
     req = Net::HTTP::Post.new(path, header)
     if params.is_a?(String)
+      unless header.has_key?('Content-Type')
+        header['Content-Type'] = 'application/octet-stream'
+      end
       req.body = params
     else
+      unless header.has_key?('Content-Type')
+        header['Content-Type'] = 'application/x-www-form-urlencoded'
+      end
       req.set_form_data(params)
     end
     http.request(req)

@@ -15,11 +15,24 @@ module FluentPluginOutputAsBufferedRetryTest
     end
   end
   class DummySyncOutput < DummyBareOutput
+    def initialize
+      super
+      @process = nil
+    end
     def process(tag, es)
       @process ? @process.call(tag, es) : nil
     end
   end
   class DummyFullFeatureOutput < DummyBareOutput
+    def initialize
+      super
+      @prefer_buffered_processing = nil
+      @prefer_delayed_commit = nil
+      @process = nil
+      @format = nil
+      @write = nil
+      @try_write = nil
+    end
     def prefer_buffered_processing
       @prefer_buffered_processing ? @prefer_buffered_processing.call : false
     end
@@ -67,7 +80,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
         yield
       end
     rescue Timeout::Error
-      STDERR.print *(@i.log.out.logs)
+      STDERR.print(*@i.log.out.logs)
       raise
     end
   end
@@ -87,6 +100,10 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
     log_time
   end
 
+  setup do
+    @i = create_output
+  end
+
   teardown do
     if @i
       @i.stop unless @i.stopped?
@@ -104,17 +121,16 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_randomize' => false,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.start
 
-      assert_equal :expbackoff, @i.buffer_config.retry_type
+      assert_equal :exponential_backoff, @i.buffer_config.retry_type
       assert_equal 1, @i.buffer_config.retry_wait
-      assert_equal 2.0, @i.buffer_config.retry_backoff_base
+      assert_equal 2.0, @i.buffer_config.retry_exponential_backoff_base
       assert !@i.buffer_config.retry_randomize
 
       now = Time.parse('2016-04-13 18:17:00 -0700')
@@ -135,11 +151,10 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_randomize' => false,
         'retry_max_interval' => 60 * 60,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:format){|tag,time,record| [tag,time.to_i,record].to_json + "\n" }
@@ -149,7 +164,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:32 -0700')
       Timecop.freeze( now )
@@ -175,11 +190,10 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_randomize' => false,
         'retry_max_interval' => 60,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:format){|tag,time,record| [tag,time.to_i,record].to_json + "\n" }
@@ -189,7 +203,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:32 -0700')
       Timecop.freeze( now )
@@ -217,7 +231,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
         prev_write_count = @i.write_count
         prev_num_errors = @i.num_errors
       end
-      # expbackoff interval: 1 * 2 ** 10 == 1024
+      # exponential backoff interval: 1 * 2 ** 10 == 1024
       # but it should be limited by retry_max_interval=60
       assert_equal 60, (@i.next_flush_time - now)
     end
@@ -228,11 +242,10 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_randomize' => false,
         'retry_timeout' => 3600,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:format){|tag,time,record| [tag,time.to_i,record].to_json + "\n" }
@@ -242,12 +255,12 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -304,7 +317,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       assert{ @i.buffer.stage.size == 0 }
       assert{ written_tags.all?{|t| t == 'test.tag.1' } }
 
-      @i.emit("test.tag.3", dummy_event_stream())
+      @i.emit_events("test.tag.3", dummy_event_stream())
 
       logs = @i.log.out.logs
       assert{ logs.any?{|l| l.include?("[error]: failed to flush the buffer, and hit limit for retries. dropping all chunks in the buffer queue.") } }
@@ -316,11 +329,10 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_randomize' => false,
         'retry_max_times' => 10,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:format){|tag,time,record| [tag,time.to_i,record].to_json + "\n" }
@@ -330,12 +342,12 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -353,7 +365,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       prev_write_count = @i.write_count
       prev_num_errors = @i.num_errors
 
-      first_failure = @i.retry.start
+      _first_failure = @i.retry.start
 
       chunks = @i.buffer.queue.dup
 
@@ -378,7 +390,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       assert{ @i.buffer.stage.size == 0 }
       assert{ written_tags.all?{|t| t == 'test.tag.1' } }
 
-      @i.emit("test.tag.3", dummy_event_stream())
+      @i.emit_events("test.tag.3", dummy_event_stream())
 
       logs = @i.log.out.logs
       assert{ logs.any?{|l| l.include?("[error]: failed to flush the buffer, and hit limit for retries. dropping all chunks in the buffer queue.") && l.include?("retry_times=10") } }
@@ -394,12 +406,11 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_type' => :periodic,
         'retry_wait' => 3,
         'retry_randomize' => false,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:format){|tag,time,record| [tag,time.to_i,record].to_json + "\n" }
@@ -409,7 +420,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:32 -0700')
       Timecop.freeze( now )
@@ -437,13 +448,12 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_type' => :periodic,
         'retry_wait' => 30,
         'retry_randomize' => false,
         'retry_timeout' => 120,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:format){|tag,time,record| [tag,time.to_i,record].to_json + "\n" }
@@ -453,12 +463,12 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -503,7 +513,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
 
       chunks = @i.buffer.queue.dup
 
-      @i.emit("test.tag.3", dummy_event_stream())
+      @i.emit_events("test.tag.3", dummy_event_stream())
 
       now = @i.next_flush_time
       Timecop.freeze( now )
@@ -530,13 +540,12 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_type' => :periodic,
         'retry_wait' => 3,
         'retry_randomize' => false,
         'retry_max_times' => 10,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:format){|tag,time,record| [tag,time.to_i,record].to_json + "\n" }
@@ -546,12 +555,12 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -569,7 +578,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       prev_write_count = @i.write_count
       prev_num_errors = @i.num_errors
 
-      first_failure = @i.retry.start
+      _first_failure = @i.retry.start
 
       chunks = @i.buffer.queue.dup
 
@@ -595,7 +604,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       assert{ written_tags.all?{|t| t == 'test.tag.1' } }
 
 
-      @i.emit("test.tag.3", dummy_event_stream())
+      @i.emit_events("test.tag.3", dummy_event_stream())
 
       logs = @i.log.out.logs
       assert{ logs.any?{|l| l.include?("[error]: failed to flush the buffer, and hit limit for retries. dropping all chunks in the buffer queue.") && l.include?("retry_times=10") } }
@@ -625,14 +634,13 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
-        'retry_type' => :expbackoff,
+        'flush_thread_burst_interval' => 0.1,
+        'retry_type' => :exponential_backoff,
         'retry_forever' => true,
         'retry_randomize' => false,
         'retry_timeout' => 3600,
         'retry_max_times' => 10,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:format){|tag,time,record| [tag,time.to_i,record].to_json + "\n" }
@@ -642,12 +650,12 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -693,7 +701,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_type' => :periodic,
         'retry_forever' => true,
         'retry_randomize' => false,
@@ -701,7 +709,6 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
         'retry_timeout' => 360,
         'retry_max_times' => 10,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:format){|tag,time,record| [tag,time.to_i,record].to_json + "\n" }
@@ -711,12 +718,12 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -762,11 +769,10 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       chunk_key = 'tag'
       hash = {
         'flush_interval' => 1,
-        'flush_burst_interval' => 0.1,
+        'flush_thread_burst_interval' => 0.1,
         'retry_randomize' => false,
         'retry_max_interval' => 60 * 60,
       }
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[config_element('buffer',chunk_key,hash)]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:prefer_delayed_commit){ true }
@@ -777,7 +783,7 @@ class BufferedOutputRetryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:32 -0700')
       Timecop.freeze( now )

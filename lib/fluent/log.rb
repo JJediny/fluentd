@@ -398,7 +398,7 @@ module Fluent
     extend Forwardable
     def_delegators '@logger', :enable_color?, :enable_debug, :enable_event,
       :disable_events, :tag, :tag=, :time_format, :time_format=,
-      :event, :caller_line, :puts, :write, :flush, :out, :out=,
+      :event, :caller_line, :puts, :write, :flush, :reset, :out, :out=,
       :optional_header, :optional_header=, :optional_attrs, :optional_attrs=
   end
 
@@ -407,7 +407,7 @@ module Fluent
     def self.included(klass)
       klass.instance_eval {
         desc 'Allows the user to set different levels of logging for each plugin.'
-        config_param :log_level, :string, default: nil, alias: :@log_level
+        config_param :@log_level, :string, default: nil, alias: :log_level # 'log_level' will be warned as deprecated
       }
     end
 
@@ -422,11 +422,11 @@ module Fluent
     def configure(conf)
       super
 
-      if @log_level
+      if level = conf['@log_level']
         unless @log.is_a?(PluginLogger)
           @log = PluginLogger.new($log.dup)
         end
-        @log.level = @log_level
+        @log.level = level
         @log.optional_header = "[#{self.class.name}#{plugin_id_configured? ? "(" + @id + ")" : ""}] "
         @log.optional_attrs = {}
       end

@@ -20,7 +20,10 @@ require 'fluent/plugin_helper/event_loop'
 require 'fluent/plugin_helper/timer'
 require 'fluent/plugin_helper/child_process'
 require 'fluent/plugin_helper/storage'
+require 'fluent/plugin_helper/parser'
+require 'fluent/plugin_helper/formatter'
 require 'fluent/plugin_helper/retry_state'
+require 'fluent/plugin_helper/compat_parameters'
 
 module Fluent
   module PluginHelper
@@ -32,7 +35,7 @@ module Fluent
 
     def helpers(*snake_case_symbols)
       helper_modules = snake_case_symbols.map{|name| Fluent::PluginHelper.const_get(name.to_s.split('_').map(&:capitalize).join) }
-      include *helper_modules
+      include(*helper_modules)
     end
   end
 end

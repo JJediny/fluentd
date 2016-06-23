@@ -18,7 +18,6 @@ require 'fluent/plugin/buffer'
 require 'fluent/unique_id'
 require 'fluent/event'
 
-require 'fileutils'
 require 'monitor'
 
 module Fluent
@@ -52,12 +51,15 @@ module Fluent
           @unique_id = generate_unique_id
           @metadata = metadata
 
+          # state: staged/queued/closed
+          @state = :staged
+
           @size = 0
           @created_at = Time.now
           @modified_at = Time.now
         end
 
-        attr_reader :unique_id, :metadata, :created_at, :modified_at
+        attr_reader :unique_id, :metadata, :created_at, :modified_at, :state
 
         # data is array of formatted record string
         def append(data)
@@ -90,15 +92,28 @@ module Fluent
           size == 0
         end
 
-        ## method for post-process of enqueue (e.g., renaming file for file chunks)
-        # def enqueued!
+        def staged?
+          @state == :staged
+        end
+
+        def queued?
+          @state == :queued
+        end
+
+        def closed?
+          @state == :closed
+        end
+
+        def enqueued!
+          @state = :queued
+        end
 
         def close
-          raise NotImplementedError, "Implement this method in child class"
+          @state = :closed
         end
 
         def purge
-          raise NotImplementedError, "Implement this method in child class"
+          @state = :closed
         end
 
         def read
@@ -111,7 +126,7 @@ module Fluent
 
         def write_to(io)
           open do |i|
-            FileUtils.copy_stream(i, io)
+            IO.copy_stream(i, io)
           end
         end
       end

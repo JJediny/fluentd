@@ -15,11 +15,24 @@ module FluentPluginOutputAsBufferedSecondaryTest
     end
   end
   class DummySyncOutput < DummyBareOutput
+    def initialize
+      super
+      @process = nil
+    end
     def process(tag, es)
       @process ? @process.call(tag, es) : nil
     end
   end
   class DummyFullFeatureOutput < DummyBareOutput
+    def initialize
+      super
+      @prefer_buffered_processing = nil
+      @prefer_delayed_commit = nil
+      @process = nil
+      @format = nil
+      @write = nil
+      @try_write = nil
+    end
     def prefer_buffered_processing
       @prefer_buffered_processing ? @prefer_buffered_processing.call : false
     end
@@ -67,7 +80,7 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
         yield
       end
     rescue Timeout::Error
-      STDERR.print *(@i.log.out.logs)
+      STDERR.print(*@i.log.out.logs)
       raise
     end
   end
@@ -77,6 +90,10 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       [ event_time('2016-04-13 18:33:13'), {"name" => "moris", "age" => 36, "message" => "data2"} ],
       [ event_time('2016-04-13 18:33:32'), {"name" => "moris", "age" => 36, "message" => "data3"} ],
     ])
+  end
+
+  setup do
+    @i = create_output
   end
 
   teardown do
@@ -115,6 +132,19 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       assert_raise Fluent::ConfigError do
         i.configure(config_element('ROOT','',{},[priconf,secconf2]))
       end
+    end
+
+    test 'uses same plugin type with primary if @type is missing in secondary' do
+      bufconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :periodic, 'retry_wait' => 3, 'retry_timeout' => 30, 'retry_randomize' => false})
+      secconf = config_element('secondary','',{})
+      priconf = config_element('ROOT', '', {'@type' => 'output_secondary_test'}, [bufconf, secconf])
+      i = create_output()
+      assert_nothing_raised do
+        i.configure(priconf)
+      end
+      logs = i.log.out.logs
+      assert{ logs.empty? }
+      assert{ i.secondary.is_a? FluentPluginOutputAsBufferedSecondaryTest::DummyFullFeatureOutput }
     end
 
     test 'warns if secondary plugin is different type from primary one' do
@@ -169,7 +199,6 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       written = []
       priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :periodic, 'retry_wait' => 3, 'retry_timeout' => 60, 'retry_randomize' => false})
       secconf = config_element('secondary','',{'@type' => 'output_secondary_test2'})
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[priconf,secconf]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:prefer_delayed_commit){ false }
@@ -182,12 +211,12 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -232,7 +261,6 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       written = []
       priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :periodic, 'retry_wait' => 3, 'retry_timeout' => 60, 'retry_randomize' => false})
       secconf = config_element('secondary','',{'@type' => 'output_secondary_test2'})
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[priconf,secconf]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:prefer_delayed_commit){ true }
@@ -245,12 +273,12 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -296,7 +324,6 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       chunks = []
       priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :periodic, 'retry_wait' => 3, 'retry_timeout' => 60, 'retry_randomize' => false})
       secconf = config_element('secondary','',{'@type' => 'output_secondary_test2'})
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[priconf,secconf]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:prefer_delayed_commit){ true }
@@ -309,12 +336,12 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -371,7 +398,6 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       chunks = []
       priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :periodic, 'retry_wait' => 3, 'retry_timeout' => 60, 'retry_randomize' => false})
       secconf = config_element('secondary','',{'@type' => 'output_secondary_test2'})
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[priconf,secconf]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:prefer_delayed_commit){ false }
@@ -384,12 +410,12 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -446,7 +472,6 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       chunks = []
       priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :periodic, 'retry_wait' => 3, 'retry_timeout' => 60, 'delayed_commit_timeout' => 2, 'retry_randomize' => false})
       secconf = config_element('secondary','',{'@type' => 'output_secondary_test2'})
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[priconf,secconf]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:prefer_delayed_commit){ false }
@@ -460,8 +485,8 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
@@ -530,7 +555,6 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
     test 'retry_wait for secondary is same with one for primary' do
       priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :periodic, 'retry_wait' => 3, 'retry_timeout' => 60, 'retry_randomize' => false})
       secconf = config_element('secondary','',{'@type' => 'output_secondary_test2'})
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[priconf,secconf]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:prefer_delayed_commit){ false }
@@ -543,12 +567,12 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -597,9 +621,8 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
 
     test 'primary plugin will emit event streams to secondary after retries for time of retry_timeout * retry_secondary_threshold' do
       written = []
-      priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :expbackoff, 'retry_wait' => 1, 'retry_timeout' => 60, 'retry_randomize' => false})
+      priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :exponential_backoff, 'retry_wait' => 1, 'retry_timeout' => 60, 'retry_randomize' => false})
       secconf = config_element('secondary','',{'@type' => 'output_secondary_test2'})
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[priconf,secconf]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:prefer_delayed_commit){ false }
@@ -612,12 +635,12 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors
@@ -666,9 +689,8 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
     end
 
     test 'exponential backoff interval will be initialized when switched to secondary' do
-      priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :expbackoff, 'retry_wait' => 1, 'retry_timeout' => 60, 'retry_randomize' => false})
+      priconf = config_element('buffer','tag',{'flush_interval' => 1, 'retry_type' => :exponential_backoff, 'retry_wait' => 1, 'retry_timeout' => 60, 'retry_randomize' => false})
       secconf = config_element('secondary','',{'@type' => 'output_secondary_test2'})
-      @i = create_output()
       @i.configure(config_element('ROOT','',{},[priconf,secconf]))
       @i.register(:prefer_buffered_processing){ true }
       @i.register(:prefer_delayed_commit){ false }
@@ -681,12 +703,12 @@ class BufferedOutputSecondaryTest < Test::Unit::TestCase
       now = Time.parse('2016-04-13 18:33:30 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.1", dummy_event_stream())
+      @i.emit_events("test.tag.1", dummy_event_stream())
 
       now = Time.parse('2016-04-13 18:33:31 -0700')
       Timecop.freeze( now )
 
-      @i.emit("test.tag.2", dummy_event_stream())
+      @i.emit_events("test.tag.2", dummy_event_stream())
 
       assert_equal 0, @i.write_count
       assert_equal 0, @i.num_errors

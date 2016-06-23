@@ -43,9 +43,6 @@ class RootAgentTest < ::Test::Unit::TestCase
       assert_empty ra.labels
       assert_empty ra.outputs
       assert_empty ra.filters
-      [:@started_inputs, :@started_outputs, :@started_filters].each { |k|
-        assert_empty ra.instance_variable_get(k)
-      }
       assert_nil ra.context
       assert_nil ra.error_collector
     end
@@ -80,11 +77,8 @@ class RootAgentTest < ::Test::Unit::TestCase
 EOC
       ra = configure_ra(conf)
       assert_kind_of FluentTestInput, ra.inputs.first
-      assert_kind_of RelabelOutput, ra.outputs.first
+      assert_kind_of Plugin::RelabelOutput, ra.outputs.first
       assert_kind_of FluentTestFilter, ra.filters.first
-      [:@started_inputs, :@started_outputs, :@started_filters].each { |k|
-        assert_empty ra.instance_variable_get(k)
-      }
       assert ra.error_collector
 
       %W(@test @ERROR).each { |label_symbol|
@@ -97,7 +91,7 @@ EOC
       assert_equal ra, test_label.root_agent
 
       error_label = ra.labels['@ERROR']
-      assert_kind_of NullOutput, error_label.outputs.first
+      assert_kind_of Fluent::Plugin::NullOutput, error_label.outputs.first
       assert_kind_of RootAgent::RootAgentProxyWithoutErrorCollector, error_label.root_agent
     end
   end
@@ -105,6 +99,7 @@ EOC
   sub_test_case 'start/shutdown' do
     setup do
       @ra = RootAgent.new(log: $log)
+      stub(Engine).root_agent { @ra }
       @ra.configure(Config.parse(<<-EOC, "(test)", "(test_dir)", true))
 <source>
   @type test_in

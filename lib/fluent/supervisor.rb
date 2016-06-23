@@ -201,7 +201,9 @@ module Fluent
       logger_initializer.init
       logger = $log
 
-      daemonize = params.fetch('daemonize', false)
+      # ServerEngine's "daemonize" option is boolean, and path of pid file is brought by "pid_path"
+      pid_path = params['daemonize']
+      daemonize = !!params['daemonize']
       main_cmd = params['main_cmd']
 
       se_config = {
@@ -232,6 +234,9 @@ module Fluent
           fluentd_conf: fluentd_conf,
           main_cmd: main_cmd,
       }
+      if daemonize
+        se_config[:pid_path] = pid_path
+      end
       pre_params = params.dup
       params['pre_loadtime'] = Time.now.to_i
       params['pre_config_mtime'] = config_mtime
@@ -306,6 +311,7 @@ module Fluent
         without_source: false,
         use_v1_config: true,
         supervise: true,
+        standalone_worker: false,
         signame: nil,
         winsvcreg: nil,
       }
@@ -314,6 +320,7 @@ module Fluent
     def initialize(opt)
       @daemonize = opt[:daemonize]
       @supervise = opt[:supervise]
+      @standalone_worker= opt[:standalone_worker]
       @config_path = opt[:config_path]
       @inline_config = opt[:inline_config]
       @use_v1_config = opt[:use_v1_config]
@@ -359,6 +366,11 @@ module Fluent
     end
 
     def run_worker
+      begin
+        require 'sigdump/setup'
+      rescue Exception
+        # ignore LoadError and others (related with signals): it may raise these errors in Windows
+      end
       @log.init
       Process.setproctitle("worker:#{@process_name}") if @process_name
 
@@ -371,6 +383,7 @@ module Fluent
       $log.info "starting fluentd-#{Fluent::VERSION} without supervision"
 
       main_process do
+        create_socket_manager if @standalone_worker
         change_privilege
         init_engine
         run_configure
@@ -380,6 +393,12 @@ module Fluent
     end
 
     private
+
+    def create_socket_manager
+      socket_manager_path = ServerEngine::SocketManager::Server.generate_path
+      ServerEngine::SocketManager::Server.open(socket_manager_path)
+      ENV['SERVERENGINE_SOCKETMANAGER_PATH'] = socket_manager_path.to_s
+    end
 
     def dry_run
       $log.info "starting fluentd-#{Fluent::VERSION} as dry run mode"
@@ -421,18 +440,20 @@ module Fluent
       $log.info "starting fluentd-#{Fluent::VERSION}"
 
       if Fluent.windows?
-        fluentd_spawn_cmd = ServerEngine.ruby_bin_path + ' "' + $0.gsub('"', '""') + '" '
+        fluentd_spawn_cmd = ServerEngine.ruby_bin_path + " -Eascii-8bit:ascii-8bit "
+        fluentd_spawn_cmd << ' "' + $0.gsub('"', '""') + '" '
         $fluentdargv.each{|a|
           fluentd_spawn_cmd << ('"' + a.gsub('"', '""') + '" ')
         }
       else
-        fluentd_spawn_cmd = $0.shellescape + ' '
+        fluentd_spawn_cmd = ServerEngine.ruby_bin_path + " -Eascii-8bit:ascii-8bit "
+        fluentd_spawn_cmd << $0.shellescape + ' '
         $fluentdargv.each{|a|
           fluentd_spawn_cmd << (a.shellescape + " ")
         }
       end
 
-      fluentd_spawn_cmd << ("--no-supervisor")
+      fluentd_spawn_cmd << ("--under-supervisor")
       $log.info "spawn command to main: " + fluentd_spawn_cmd
 
       params = {}
@@ -453,10 +474,19 @@ module Fluent
     end
 
     def install_main_process_signal_handlers
+      # Fluentd worker process (worker of ServerEngine) don't use code in serverengine to set signal handlers,
+      # because it does almost nothing.
+      # This method is the only method to set signal handlers in Fluentd worker process.
+
       # When user use Ctrl + C not SIGINT, SIGINT is sent to all process in same process group.
-      # Then serverengine can't handle signal, so need to handle it in this process.
+      # ServerEngine server process will send SIGTERM to child(spawned) processes by that SIGINT, so
+      # worker process SHOULD NOT do anything with SIGINT, SHOULD just ignore.
       trap :INT do
         $log.debug "fluentd main process get SIGINT"
+      end
+
+      trap :TERM do
+        $log.debug "fluentd main process get SIGTERM"
         unless @finished
           @finished = true
           $log.debug "getting start to shutdown main process"

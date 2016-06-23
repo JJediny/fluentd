@@ -1,9 +1,10 @@
 require_relative '../helper'
 require 'fluent/test'
 require 'fluent/plugin/in_tail'
+require 'fluent/plugin/buffer'
 require 'fluent/system_config'
 require 'net/http'
-require 'flexmock'
+require 'flexmock/test_unit'
 
 class TailInputTest < Test::Unit::TestCase
   include FlexMock::TestCase
@@ -770,7 +771,7 @@ class TailInputTest < Test::Unit::TestCase
 
   sub_test_case 'emit error cases' do
     def test_emit_error_with_buffer_queue_limit_error
-      emits = execute_test(::Fluent::BufferQueueLimitError, "queue size exceeds limit")
+      emits = execute_test(Fluent::Plugin::Buffer::BufferOverflowError, "buffer space has too many data")
       assert_equal(10, emits.length)
       10.times { |i|
         assert_equal({"message" => "test#{i}"}, emits[i][2])
@@ -807,6 +808,121 @@ class TailInputTest < Test::Unit::TestCase
       end
 
       d.emits
+    end
+  end
+
+  sub_test_case "tail_path" do
+    def test_tail_path_with_singleline
+      File.open("#{TMP_DIR}/tail.txt", "wb") {|f|
+        f.puts "test1"
+        f.puts "test2"
+      }
+
+      d = create_driver(%[path_key path] + SINGLE_LINE_CONFIG)
+
+      d.run do
+        sleep 1
+
+        File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
+          f.puts "test3"
+          f.puts "test4"
+        }
+        sleep 1
+      end
+
+      emits = d.emits
+      assert_equal(true, emits.length > 0)
+      emits.each do |emit|
+        assert_equal("#{TMP_DIR}/tail.txt", emit[2]["path"])
+      end
+    end
+
+    def test_tail_path_with_multiline_with_firstline
+      File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
+
+      d = create_driver %[
+        path_key path
+        format multiline
+        format1 /^s (?<message1>[^\\n]+)(\\nf (?<message2>[^\\n]+))?(\\nf (?<message3>.*))?/
+        format_firstline /^[s]/
+      ]
+      d.run do
+        File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
+          f.puts "f test1"
+          f.puts "s test2"
+          f.puts "f test3"
+          f.puts "f test4"
+          f.puts "s test5"
+          f.puts "s test6"
+          f.puts "f test7"
+          f.puts "s test8"
+        }
+        sleep 1
+      end
+
+      emits = d.emits
+      assert(emits.length == 4)
+      emits.each do |emit|
+        assert_equal("#{TMP_DIR}/tail.txt", emit[2]["path"])
+      end
+    end
+
+    def test_tail_path_with_multiline_without_firstline
+      File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
+
+      d = create_driver %[
+        path_key path
+        format multiline
+        format1 /(?<var1>foo \\d)\\n/
+        format2 /(?<var2>bar \\d)\\n/
+        format3 /(?<var3>baz \\d)/
+      ]
+      d.run do
+        File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
+          f.puts "foo 1"
+          f.puts "bar 1"
+          f.puts "baz 1"
+        }
+        sleep 1
+      end
+
+      emits = d.emits
+      assert(emits.length > 0)
+      emits.each do |emit|
+        assert_equal("#{TMP_DIR}/tail.txt", emit[2]["path"])
+      end
+    end
+
+    def test_tail_path_with_multiline_with_multiple_paths
+      files = ["#{TMP_DIR}/tail1.txt", "#{TMP_DIR}/tail2.txt"]
+      files.each { |file| File.open(file, "wb") { |f| } }
+
+      d = create_driver(%[
+        path #{files[0]},#{files[1]}
+        path_key path
+        tag t1
+        format multiline
+        format1 /^[s|f] (?<message>.*)/
+        format_firstline /^[s]/
+      ], false)
+      d.run do
+        files.each do |file|
+          File.open(file, 'ab') { |f|
+            f.puts "f #{file} line should be ignored"
+            f.puts "s test1"
+            f.puts "f test2"
+            f.puts "f test3"
+            f.puts "s test4"
+          }
+        end
+        sleep 1
+      end
+
+      emits = d.emits
+      assert(emits.length == 4)
+      assert_equal(files, [emits[0][2]["path"], emits[1][2]["path"]].sort)
+      # "test4" events are here because these events are flushed at shutdown phase
+      assert_equal(files, [emits[2][2]["path"], emits[3][2]["path"]].sort)
     end
   end
 end

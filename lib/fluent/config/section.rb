@@ -26,12 +26,21 @@ module Fluent
         'Fluent::Config::Section'
       end
 
-      def initialize(params = {})
+      def initialize(params = {}, config_element = nil)
         @klass = 'Fluent::Config::Section'
         @params = params
+        @corresponding_config_element = config_element
       end
 
       alias :object_id :__id__
+
+      def corresponding_config_element
+        @corresponding_config_element
+      end
+
+      def class
+        Section
+      end
 
       def to_s
         inspect
@@ -114,7 +123,7 @@ module Fluent
             section_params[key] = self.instance_exec(conf.arg, opts, name, &block)
           end
           unless section_params.has_key?(proxy.argument.first)
-            logger.error "config error in:\n#{conf}"
+            logger.error "config error in:\n#{conf}" if logger # logger should exist, but somethimes it's nil (e.g, in tests)
             raise ConfigError, "'<#{proxy.name} ARG>' section requires argument" + section_stack
           end
         end
@@ -131,7 +140,7 @@ module Fluent
             section_params[varname] = self.instance_exec(val, opts, name, &block)
           end
           unless section_params.has_key?(varname)
-            logger.error "config error in:\n#{conf}"
+            logger.error "config error in:\n#{conf}" if logger
             raise ConfigError, "'#{name}' parameter is required" + section_stack
           end
         end
@@ -139,7 +148,7 @@ module Fluent
         check_unused_section(proxy, conf, plugin_class)
 
         proxy.sections.each do |name, subproxy|
-          varname = subproxy.param_name.to_sym
+          varname = subproxy.variable_name
           elements = (conf.respond_to?(:elements) ? conf.elements : []).select{ |e| e.name == subproxy.name.to_s || e.name == subproxy.alias.to_s }
           if elements.empty? && subproxy.init? && !subproxy.multi?
             elements << Fluent::Config::Element.new(subproxy.name.to_s, '', {}, [])
@@ -151,21 +160,21 @@ module Fluent
           }
 
           if subproxy.required? && elements.size < 1
-            logger.error "config error in:\n#{conf}"
+            logger.error "config error in:\n#{conf}" if logger
             raise ConfigError, "'<#{subproxy.name}>' sections are required" + section_stack
           end
           if subproxy.multi?
             section_params[varname] = elements.map{ |e| generate(subproxy, e, logger, plugin_class, stack + [subproxy.name]) }
           else
             if elements.size > 1
-              logger.error "config error in:\n#{conf}"
+              logger.error "config error in:\n#{conf}" if logger
               raise ConfigError, "'<#{subproxy.name}>' section cannot be written twice or more" + section_stack
             end
             section_params[varname] = generate(subproxy, elements.first, logger, plugin_class, stack + [subproxy.name])
           end
         end
 
-        Section.new(section_params)
+        Section.new(section_params, conf)
       end
 
       def self.check_unused_section(proxy, conf, plugin_class)

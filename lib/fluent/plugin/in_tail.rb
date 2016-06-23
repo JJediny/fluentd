@@ -20,6 +20,7 @@ require 'fluent/input'
 require 'fluent/config/error'
 require 'fluent/event'
 require 'fluent/system_config'
+require 'fluent/plugin/buffer'
 
 if Fluent.windows?
   require_relative 'file_wrapper'
@@ -71,6 +72,8 @@ module Fluent
         raise ConfigError, e.message
       end
     end
+    desc 'Add the log path being tailed to records. Specify the field name to be used.'
+    config_param :path_key, :string, default: nil
 
     attr_reader :paths
 
@@ -115,6 +118,8 @@ module Fluent
     end
 
     def start
+      super
+
       if @pos_file
         @pf_file = File.open(@pos_file, File::RDWR|File::CREAT|File::BINARY, @file_perm)
         @pf_file.sync = true
@@ -136,6 +141,8 @@ module Fluent
       @loop.stop rescue nil # when all watchers are detached, `stop` raises RuntimeError. We can ignore this exception.
       @thread.join
       @pf_file.close if @pf_file
+
+      super
     end
 
     def expand_paths
@@ -252,6 +259,7 @@ module Fluent
                   else
                     @tag
                   end
+            record[@path_key] ||= tw.path unless @path_key.nil?
             router.emit(tag, time, record)
           else
             log.warn "got incomplete line at shutdown from #{tw.path}: #{lb.inspect}"
@@ -267,7 +275,7 @@ module Fluent
       log.error_backtrace
     end
 
-    # @return true if no error or unrecoverable error happens in emit action. false if got BufferQueueLimitError
+    # @return true if no error or unrecoverable error happens in emit action. false if got BufferOverflowError
     def receive_lines(lines, tail_watcher)
       es = @receive_handler.call(lines, tail_watcher)
       unless es.empty?
@@ -278,7 +286,7 @@ module Fluent
               end
         begin
           router.emit_stream(tag, es)
-        rescue BufferQueueLimitError
+        rescue Fluent::Plugin::Buffer::BufferOverflowError
           return false
         rescue
           # ignore non BufferQueueLimitError errors because in_tail can't recover. Engine shows logs and backtraces.
@@ -289,12 +297,13 @@ module Fluent
       return true
     end
 
-    def convert_line_to_event(line, es)
+    def convert_line_to_event(line, es, tail_watcher)
       begin
         line.chomp!  # remove \n
         line.force_encoding(@encoding) if @encoding
         @parser.parse(line) { |time, record|
           if time && record
+            record[@path_key] ||= tail_watcher.path unless @path_key.nil?
             es.add(time, record)
           else
             log.warn "pattern not match: #{line.inspect}"
@@ -309,7 +318,7 @@ module Fluent
     def parse_singleline(lines, tail_watcher)
       es = MultiEventStream.new
       lines.each { |line|
-        convert_line_to_event(line, es)
+        convert_line_to_event(line, es, tail_watcher)
       }
       es
     end
@@ -322,7 +331,7 @@ module Fluent
         lines.each { |line|
           if @parser.firstline?(line)
             if lb
-              convert_line_to_event(lb, es)
+              convert_line_to_event(lb, es, tail_watcher)
             end
             lb = line
           else
@@ -339,7 +348,7 @@ module Fluent
           lb << line
           @parser.parse(lb) { |time, record|
             if time && record
-              convert_line_to_event(lb, es)
+              convert_line_to_event(lb, es, tail_watcher)
               lb = ''
             end
           }

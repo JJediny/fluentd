@@ -24,7 +24,7 @@ module Fluent::Config
               name: 'tagomoris',
               age: 34,
               send: 'email',
-              class: 'normal',
+              klass: 'normal',
               keys: 5,
             }
             s1 = Fluent::Config::Section.new(hash)
@@ -32,13 +32,13 @@ module Fluent::Config
             assert_equal("tagomoris", s1[:name])
             assert_equal(34, s1[:age])
             assert_equal("email", s1[:send])
-            assert_equal("normal", s1[:class])
+            assert_equal("normal", s1[:klass])
             assert_equal(5, s1[:keys])
 
             assert_equal("tagomoris", s1.name)
             assert_equal(34, s1.age)
             assert_equal("email", s1.send)
-            assert_equal("normal", s1.class)
+            assert_equal("normal", s1.klass)
             assert_equal(5, s1.keys)
 
             assert_raise(NoMethodError) { s1.dup }
@@ -49,7 +49,7 @@ module Fluent::Config
               name: 'tagomoris',
               age: 34,
               send: 'email',
-              class: 'normal',
+              klass: 'normal',
               keys: 5,
             }
             hash['@id'.to_sym] = 'myid'
@@ -58,6 +58,26 @@ module Fluent::Config
             assert_equal('myid', s1['@id'])
             assert_equal('myid', s1['@id'.to_sym])
             assert_equal('myid', s1.__send__('@id'.to_sym))
+          end
+
+          test 'creates object and config element which corresponds to section object itself' do
+            hash = {
+              name: 'tagomoris',
+              age: 34,
+              send: 'email',
+              klass: 'normal',
+              keys: 5,
+            }
+            hash['@id'.to_sym] = 'myid'
+            conf = config_element('section', '', {'name' => 'tagomoris', 'age' => 34, 'send' => 'email', 'klass' => 'normal', 'keys' => 5})
+            s2 = Fluent::Config::Section.new(hash, conf)
+            assert s2.corresponding_config_element.is_a?(Fluent::Config::Element)
+          end
+        end
+
+        sub_test_case '#class' do
+          test 'returns class constant' do
+            assert_equal Fluent::Config::Section, Fluent::Config::Section.new({}).class
           end
         end
 
@@ -77,7 +97,7 @@ module Fluent::Config
               name: 'tagomoris',
               age: 34,
               send: 'email',
-              class: 'normal',
+              klass: 'normal',
               keys: 5,
             }
             s = Fluent::Config::Section.new(hash)
@@ -105,10 +125,10 @@ module Fluent::Config
 
         sub_test_case '#+' do
           test 'can merge 2 sections: argument side is primary, internal hash is newly created' do
-            h1 = {name: "s1", num: 10, class: "A"}
+            h1 = {name: "s1", num: 10, klass: "A"}
             s1 = Fluent::Config::Section.new(h1)
 
-            h2 = {name: "s2", class: "A", num2: "5", num3: "8"}
+            h2 = {name: "s2", klass: "A", num2: "5", num3: "8"}
             s2 = Fluent::Config::Section.new(h2)
             s = s1 + s2
 
@@ -117,7 +137,7 @@ module Fluent::Config
 
             assert_equal("s2", s.name)
             assert_equal(10, s.num)
-            assert_equal("A", s.class)
+            assert_equal("A", s.klass)
             assert_equal("5", s.num2)
             assert_equal("8", s.num3)
           end
@@ -125,7 +145,7 @@ module Fluent::Config
 
         sub_test_case '#to_s' do
           test '#to_s == #inspect' do
-            h1 = {name: "s1", num: 10, class: "A"}
+            h1 = {name: "s1", num: 10, klass: "A"}
             s1 = Fluent::Config::Section.new(h1)
 
             assert_equal(s1.to_s, s1.inspect)
@@ -154,7 +174,7 @@ module Fluent::Config
              "no_such_method" => [:no_such_method, false])
         test '#respond_to?' do |data|
           method, expected = data
-          h1 = {name: "s1", num: 10, class: "A"}
+          h1 = {name: "s1", num: 10, klass: "A"}
           s1 = Fluent::Config::Section.new(h1)
           assert_equal(expected, s1.respond_to?(method))
         end

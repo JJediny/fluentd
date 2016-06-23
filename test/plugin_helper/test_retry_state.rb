@@ -4,15 +4,16 @@ require 'fluent/plugin/base'
 
 require 'time'
 
-class Fluent::PluginHelper::RetryState::RetryStateMachine
-  def override_current_time(time)
-    (class << self; self; end).module_eval do
+class RetryStateHelperTest < Test::Unit::TestCase
+  def override_current_time(state, time)
+    mojule = Module.new do
       define_method(:current_time){ time }
     end
+    state.singleton_class.module_eval do
+      prepend mojule
+    end
   end
-end
 
-class RetryStateHelperTest < Test::Unit::TestCase
   class Dummy < Fluent::Plugin::TestBase
     helpers :retry_state
   end
@@ -22,13 +23,13 @@ class RetryStateHelperTest < Test::Unit::TestCase
   end
 
   test 'randomize can generate value within specified +/- range' do
-    s = @d.retry_state_create(:t1, :expbackoff, 0.1, 30) # default enabled w/ 0.125
+    s = @d.retry_state_create(:t1, :exponential_backoff, 0.1, 30) # default enabled w/ 0.125
     500.times do
       r = s.randomize(1000)
       assert{ r >= 875 && r < 1125 }
     end
 
-    s = @d.retry_state_create(:t1, :expbackoff, 0.1, 30, randomize_width: 0.25)
+    s = @d.retry_state_create(:t1, :exponential_backoff, 0.1, 30, randomize_width: 0.25)
     500.times do
       r = s.randomize(1000)
       assert{ r >= 750 && r < 1250 }
@@ -36,7 +37,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
   end
 
   test 'plugin can create retry_state machine' do
-    s = @d.retry_state_create(:t1, :expbackoff, 0.1, 30)
+    s = @d.retry_state_create(:t1, :exponential_backoff, 0.1, 30)
     # attr_reader :title, :start, :steps, :next_time, :timeout_at, :current, :secondary_transition_at, :secondary_transition_times
 
     assert_equal :t1, s.title
@@ -54,7 +55,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
   test 'periodic retries' do
     s = @d.retry_state_create(:t2, :periodic, 3, 29, randomize: false)
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
     assert_equal (dummy_current_time + 29), s.timeout_at
@@ -62,7 +63,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
 
     i = 1
     while i < 9
-      s.override_current_time(s.next_time)
+      override_current_time(s, s.next_time)
       s.step
       assert_equal i, s.steps
       assert_equal (s.current_time + 3), s.next_time
@@ -71,7 +72,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
     end
 
     assert_equal 9, i
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal s.timeout_at, s.next_time
     assert s.limit?
@@ -80,7 +81,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
   test 'periodic retries with max_steps' do
     s = @d.retry_state_create(:t2, :periodic, 3, 29, randomize: false, max_steps: 5)
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
     assert_equal (dummy_current_time + 29), s.timeout_at
@@ -88,7 +89,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
 
     i = 1
     while i < 5
-      s.override_current_time(s.next_time)
+      override_current_time(s, s.next_time)
       s.step
       assert_equal i, s.steps
       assert_equal (s.current_time + 3), s.next_time
@@ -97,7 +98,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
     end
 
     assert_equal 5, i
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal (s.current_time + 3), s.next_time
     assert s.limit?
@@ -106,7 +107,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
   test 'periodic retries with secondary' do
     s = @d.retry_state_create(:t3, :periodic, 3, 100, randomize: false, secondary: true) # threshold 0.8
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
     assert_equal (dummy_current_time + 100), s.timeout_at
@@ -117,7 +118,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
 
     i = 1
     while i < 26
-      s.override_current_time(s.next_time)
+      override_current_time(s, s.next_time)
       assert !s.secondary?
 
       s.step
@@ -128,7 +129,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
     end
 
     assert_equal 26, i
-    s.override_current_time(s.next_time) # 78
+    override_current_time(s, s.next_time) # 78
     assert !s.secondary?
 
     s.step
@@ -138,7 +139,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
 
     i += 1
     assert_equal 27, i
-    s.override_current_time(s.next_time) # 80
+    override_current_time(s, s.next_time) # 80
     assert s.secondary?
 
     s.step
@@ -149,7 +150,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
     i += 1
 
     while i < 33
-      s.override_current_time(s.next_time)
+      override_current_time(s, s.next_time)
       assert s.secondary?
 
       s.step
@@ -159,7 +160,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
     end
 
     assert_equal 33, i
-    s.override_current_time(s.next_time) # 98
+    override_current_time(s, s.next_time) # 98
     assert s.secondary?
 
     s.step
@@ -170,7 +171,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
   test 'periodic retries with secondary and specified threshold' do
     s = @d.retry_state_create(:t3, :periodic, 3, 100, randomize: false, secondary: true, secondary_threshold: 0.75)
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
     assert_equal (dummy_current_time + 100), s.timeout_at
@@ -178,9 +179,9 @@ class RetryStateHelperTest < Test::Unit::TestCase
   end
 
   test 'exponential backoff forever without randomization' do
-    s = @d.retry_state_create(:t11, :expbackoff, 0.1, 300, randomize: false, forever: true, backoff_base: 2)
+    s = @d.retry_state_create(:t11, :exponential_backoff, 0.1, 300, randomize: false, forever: true, backoff_base: 2)
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
 
@@ -198,9 +199,9 @@ class RetryStateHelperTest < Test::Unit::TestCase
   end
 
   test 'exponential backoff with max_interval' do
-    s = @d.retry_state_create(:t12, :expbackoff, 0.1, 300, randomize: false, forever: true, backoff_base: 2, max_interval: 100)
+    s = @d.retry_state_create(:t12, :exponential_backoff, 0.1, 300, randomize: false, forever: true, backoff_base: 2, max_interval: 100)
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
 
@@ -227,9 +228,9 @@ class RetryStateHelperTest < Test::Unit::TestCase
   end
 
   test 'exponential backoff with shorter timeout' do
-    s = @d.retry_state_create(:t13, :expbackoff, 1, 12, randomize: false, backoff_base: 2, max_interval: 10)
+    s = @d.retry_state_create(:t13, :exponential_backoff, 1, 12, randomize: false, backoff_base: 2, max_interval: 10)
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
 
@@ -240,17 +241,17 @@ class RetryStateHelperTest < Test::Unit::TestCase
 
     # 1 + 1 + 2 + 4 (=8)
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 1, s.steps
     assert_equal (s.current_time + 1), s.next_time
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 2, s.steps
     assert_equal (s.current_time + 2), s.next_time
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 3, s.steps
     assert_equal (s.current_time + 4), s.next_time
@@ -259,7 +260,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
 
     # + 8 (=16) > 12
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 4, s.steps
     assert_equal s.timeout_at, s.next_time
@@ -268,9 +269,9 @@ class RetryStateHelperTest < Test::Unit::TestCase
   end
 
   test 'exponential backoff with max_steps' do
-    s = @d.retry_state_create(:t14, :expbackoff, 1, 120, randomize: false, backoff_base: 2, max_interval: 10, max_steps: 6)
+    s = @d.retry_state_create(:t14, :exponential_backoff, 1, 120, randomize: false, backoff_base: 2, max_interval: 10, max_steps: 6)
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
 
@@ -279,38 +280,38 @@ class RetryStateHelperTest < Test::Unit::TestCase
     assert_equal 0, s.steps
     assert_equal (dummy_current_time + 1), s.next_time
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 1, s.steps
     assert_equal (s.current_time + 1), s.next_time
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 2, s.steps
     assert_equal (s.current_time + 2), s.next_time
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 3, s.steps
     assert_equal (s.current_time + 4), s.next_time
 
     assert !s.limit?
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 4, s.steps
     assert_equal (s.current_time + 8), s.next_time
 
     assert !s.limit?
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 5, s.steps
     assert_equal (s.current_time + 10), s.next_time
 
     assert !s.limit?
 
-    s.override_current_time(s.next_time)
+    override_current_time(s, s.next_time)
     s.step
     assert_equal 6, s.steps
     assert_equal (s.current_time + 10), s.next_time
@@ -319,9 +320,9 @@ class RetryStateHelperTest < Test::Unit::TestCase
   end
 
   test 'exponential backoff retries with secondary' do
-    s = @d.retry_state_create(:t15, :expbackoff, 1, 100, randomize: false, backoff_base: 2, secondary: true) # threshold 0.8
+    s = @d.retry_state_create(:t15, :exponential_backoff, 1, 100, randomize: false, backoff_base: 2, secondary: true) # threshold 0.8
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
     assert_equal (dummy_current_time + 100), s.timeout_at
@@ -333,7 +334,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
     # 1, 1(2), 2(4), 4(8), 8(16), 16(32), 32(64), (80), (81), (83), (87), (95), (100)
     i = 1
     while i < 7
-      s.override_current_time(s.next_time)
+      override_current_time(s, s.next_time)
       assert !s.secondary?
 
       s.step
@@ -344,7 +345,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
     end
 
     assert_equal 7, i
-    s.override_current_time(s.next_time) # 64
+    override_current_time(s, s.next_time) # 64
     assert !s.secondary?
 
     s.step
@@ -354,7 +355,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
 
     i += 1
     assert_equal 8, i
-    s.override_current_time(s.next_time) # 80
+    override_current_time(s, s.next_time) # 80
     assert s.secondary?
 
     s.step
@@ -366,7 +367,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
     # 81, 82, 84, 88, 96, 100
     j = 1
     while j < 4
-      s.override_current_time(s.next_time)
+      override_current_time(s, s.next_time)
       assert s.secondary?
       assert_equal :secondary, s.current
 
@@ -378,7 +379,7 @@ class RetryStateHelperTest < Test::Unit::TestCase
     end
 
     assert_equal 4, j
-    s.override_current_time(s.next_time) # 96
+    override_current_time(s, s.next_time) # 96
     assert s.secondary?
 
     s.step
@@ -387,9 +388,9 @@ class RetryStateHelperTest < Test::Unit::TestCase
   end
 
   test 'exponential backoff retries with secondary and specified threshold' do
-    s = @d.retry_state_create(:t16, :expbackoff, 1, 100, randomize: false, secondary: true, backoff_base: 2, secondary_threshold: 0.75)
+    s = @d.retry_state_create(:t16, :exponential_backoff, 1, 100, randomize: false, secondary: true, backoff_base: 2, secondary_threshold: 0.75)
     dummy_current_time = s.start
-    s.override_current_time(dummy_current_time)
+    override_current_time(s, dummy_current_time)
 
     assert_equal dummy_current_time, s.current_time
     assert_equal (dummy_current_time + 100), s.timeout_at

@@ -39,9 +39,7 @@ module Fluent
     end
 
     def self.create(conf)
-      systems = conf.elements.select { |e|
-        e.name == 'system'
-      }
+      systems = conf.elements(name: 'system')
       return SystemConfig.new if systems.empty?
       raise Fluent::ConfigError, "<system> is duplicated. <system> should be only one" if systems.size > 1
 
@@ -53,7 +51,7 @@ module Fluent
     end
 
     def self.overwrite_system_config(hash)
-      older = $_system_config || nil
+      older = defined?($_system_config) ? $_system_config : nil
       begin
         $_system_config = SystemConfig.new(Fluent::Config::Element.new('system', '', hash, []))
         yield
@@ -103,16 +101,17 @@ module Fluent
     module Mixin
       def system_config
         require 'fluent/engine'
-        unless $_system_config
+        unless defined?($_system_config)
           $_system_config = nil
         end
-        @_system_config || $_system_config || Fluent::Engine.system_config
+        (instance_variable_defined?("@_system_config") && @_system_config) ||
+          $_system_config || Fluent::Engine.system_config
       end
 
       def system_config_override(opts={})
         require 'fluent/engine'
-        unless @_system_config
-          @_system_config = ($_system_config || Fluent::Engine.system_config).dup
+        if !instance_variable_defined?("@_system_config") || @_system_config.nil?
+          @_system_config = (defined?($_system_config) && $_system_config ? $_system_config : Fluent::Engine.system_config).dup
         end
         opts.each_pair do |key, value|
           @_system_config.send(:"#{key.to_s}=", value)

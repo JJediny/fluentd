@@ -14,7 +14,6 @@
 #    limitations under the License.
 #
 
-require 'fluent/engine'
 require 'fluent/time'
 
 module Fluent
@@ -42,6 +41,14 @@ module Fluent
         @_event_emitter_used_actually
       end
 
+      def event_emitter_router(label_name)
+        if label_name
+          Engine.root_agent.find_label(label_name).event_router
+        else
+          Engine.root_agent.event_router
+        end
+      end
+
       def initialize
         super
         @_event_emitter_used_actually = false
@@ -49,14 +56,9 @@ module Fluent
       end
 
       def configure(conf)
+        require 'fluent/engine'
         super
-
-        if label_name = conf['@label']
-          label = Engine.root_agent.find_label(label_name)
-          @router = label.event_router
-        elsif @router.nil?
-          @router = Engine.root_agent.event_router
-        end
+        @router = event_emitter_router(conf['@label'])
       end
 
       def after_shutdown

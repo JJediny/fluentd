@@ -38,16 +38,13 @@ module Fluent
 
         FILE_PERMISSION = 0644
 
-        attr_reader :path, :state, :permission
+        attr_reader :path, :permission
 
         def initialize(metadata, path, mode, perm: system_config.file_permission || FILE_PERMISSION)
           super(metadata)
-          # state: staged/queued/closed
-          @state = nil
-
           @permission = perm
-
           @bytesize = @size = @adding_bytes = @adding_size = 0
+          @meta = nil
 
           case mode
           when :create then create_new_chunk(path, perm)
@@ -59,7 +56,7 @@ module Fluent
         end
 
         def append(data)
-          raise "BUG: appending to non-staged chunk, now '#{@state}'" unless @state == :staged
+          raise "BUG: appending to non-staged chunk, now '#{self.state}'" unless self.staged?
 
           bytes = 0
           adding = ''.force_encoding(Encoding::ASCII_8BIT)
@@ -77,7 +74,7 @@ module Fluent
         end
 
         def concat(bulk, bulk_size)
-          raise "BUG: appending to non-staged chunk, now '#{@state}'" unless @state == :staged
+          raise "BUG: appending to non-staged chunk, now '#{self.state}'" unless self.staged?
 
           bulk.force_encoding(Encoding::ASCII_8BIT)
           @chunk.write bulk
@@ -119,8 +116,25 @@ module Fluent
           @bytesize == 0
         end
 
+        def enqueued!
+          return unless self.staged?
+
+          new_chunk_path = self.class.generate_queued_chunk_path(@path, @unique_id)
+          new_meta_path = new_chunk_path + '.meta'
+
+          write_metadata(update: false) # re-write metadata w/ finalized records
+
+          file_rename(@chunk, @path, new_chunk_path, ->(new_io){ @chunk = new_io })
+          @path = new_chunk_path
+
+          file_rename(@meta, @meta_path, new_meta_path, ->(new_io){ @meta = new_io })
+          @meta_path = new_meta_path
+
+          super
+        end
+
         def close
-          @state = :closed
+          super
           size = @chunk.size
           @chunk.close
           @meta.close if @meta # meta may be missing if chunk is queued at first
@@ -130,7 +144,7 @@ module Fluent
         end
 
         def purge
-          @state = :closed
+          super
           @chunk.close
           @meta.close if @meta
           @bytesize = @size = @adding_bytes = @adding_size = 0
@@ -145,7 +159,7 @@ module Fluent
         def open(&block)
           @chunk.seek(0, IO::SEEK_SET)
           val = yield @chunk
-          @chunk.seek(0, IO::SEEK_END) if @state == :staged
+          @chunk.seek(0, IO::SEEK_END) if self.staged?
           val
         end
 
@@ -171,7 +185,7 @@ module Fluent
 
         def self.generate_queued_chunk_path(path, unique_id)
           chunk_id = Fluent::UniqueId.hex(unique_id)
-          if pos = path.index(".b#{chunk_id}.")
+          if path.index(".b#{chunk_id}.")
             path.sub(".b#{chunk_id}.", ".q#{chunk_id}.")
           else # for unexpected cases (ex: users rename files while opened by fluentd)
             path + ".q#{chunk_id}.chunk"
@@ -222,23 +236,6 @@ module Fluent
           @meta.seek(0, IO::SEEK_SET)
           @meta.truncate(0)
           @meta.write(msgpack_packer.pack(data))
-        end
-
-        def enqueued!
-          return unless @state == :staged
-
-          new_chunk_path = self.class.generate_queued_chunk_path(@path, @unique_id)
-          new_meta_path = new_chunk_path + '.meta'
-
-          write_metadata(update: false) # re-write metadata w/ finalized records
-
-          file_rename(@chunk, @path, new_chunk_path, ->(new_io){ @chunk = new_io })
-          @path = new_chunk_path
-
-          file_rename(@meta, @meta_path, new_meta_path, ->(new_io){ @meta = new_io })
-          @meta_path = new_meta_path
-
-          @state = :queued
         end
 
         def file_rename(file, old_path, new_path, callback=nil)

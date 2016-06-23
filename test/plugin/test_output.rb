@@ -14,11 +14,20 @@ module FluentPluginOutputTest
     end
   end
   class DummySyncOutput < DummyBareOutput
+    def initialize
+      super
+      @process = nil
+    end
     def process(tag, es)
       @process ? @process.call(tag, es) : nil
     end
   end
   class DummyAsyncOutput < DummyBareOutput
+    def initialize
+      super
+      @format = nil
+      @write = nil
+    end
     def format(tag, time, record)
       @format ? @format.call(tag, time, record) : [tag, time, record].to_json
     end
@@ -27,11 +36,20 @@ module FluentPluginOutputTest
     end
   end
   class DummyAsyncStandardOutput < DummyBareOutput
+    def initialize
+      super
+      @write = nil
+    end
     def write(chunk)
       @write ? @write.call(chunk) : nil
     end
   end
   class DummyDelayedOutput < DummyBareOutput
+    def initialize
+      super
+      @format = nil
+      @try_write = nil
+    end
     def format(tag, time, record)
       @format ? @format.call(tag, time, record) : [tag, time, record].to_json
     end
@@ -40,11 +58,24 @@ module FluentPluginOutputTest
     end
   end
   class DummyDelayedStandardOutput < DummyBareOutput
+    def initialize
+      super
+      @try_write = nil
+    end
     def try_write(chunk)
       @try_write ? @try_write.call(chunk) : nil
     end
   end
   class DummyFullFeatureOutput < DummyBareOutput
+    def initialize
+      super
+      @prefer_buffered_processing = nil
+      @prefer_delayed_commit = nil
+      @process = nil
+      @format = nil
+      @write = nil
+      @try_write = nil
+    end
     def prefer_buffered_processing
       @prefer_buffered_processing ? @prefer_buffered_processing.call : false
     end
@@ -89,7 +120,7 @@ class OutputTest < Test::Unit::TestCase
         yield
       end
     rescue Timeout::Error
-      STDERR.print *(@i.log.out.logs)
+      STDERR.print(*@i.log.out.logs)
       raise
     end
   end
@@ -183,7 +214,7 @@ class OutputTest < Test::Unit::TestCase
     end
 
     test '#extract_placeholders can extract time if time key and range are configured' do
-      @i.configure(config_element('ROOT', '', {}, [config_element('buffer', 'time', {'timekey_range' => 60*30, 'timekey_zone' => "+0900"})]))
+      @i.configure(config_element('ROOT', '', {}, [config_element('buffer', 'time', {'timekey' => 60*30, 'timekey_zone' => "+0900"})]))
       assert @i.chunk_key_time
       assert !@i.chunk_key_tag
       assert_equal [], @i.chunk_keys
@@ -219,7 +250,7 @@ class OutputTest < Test::Unit::TestCase
     end
 
     test '#extract_placeholders can extract all chunk keys if configured' do
-      @i.configure(config_element('ROOT', '', {}, [config_element('buffer', 'time,tag,key1,key2', {'timekey_range' => 60*30, 'timekey_zone' => "+0900"})]))
+      @i.configure(config_element('ROOT', '', {}, [config_element('buffer', 'time,tag,key1,key2', {'timekey' => 60*30, 'timekey_zone' => "+0900"})]))
       assert @i.chunk_key_time
       assert @i.chunk_key_tag
       assert_equal ['key1','key2'], @i.chunk_keys
@@ -231,7 +262,7 @@ class OutputTest < Test::Unit::TestCase
     end
 
     test '#extract_placeholders removes out-of-range tag part and unknown variable placeholders' do
-      @i.configure(config_element('ROOT', '', {}, [config_element('buffer', 'time,tag,key1,key2', {'timekey_range' => 60*30, 'timekey_zone' => "+0900"})]))
+      @i.configure(config_element('ROOT', '', {}, [config_element('buffer', 'time,tag,key1,key2', {'timekey' => 60*30, 'timekey_zone' => "+0900"})]))
       assert @i.chunk_key_time
       assert @i.chunk_key_tag
       assert_equal ['key1','key2'], @i.chunk_keys
@@ -257,7 +288,7 @@ class OutputTest < Test::Unit::TestCase
       assert_equal create_metadata(tag: tag), i2.metadata(tag, time, record)
 
       i3 = create_output(:buffered)
-      i3.configure(config_element('ROOT','',{},[config_element('buffer', 'time', {"timekey_range" => 3600, "timekey_zone" => "-0700"})]))
+      i3.configure(config_element('ROOT','',{},[config_element('buffer', 'time', {"timekey" => 3600, "timekey_zone" => "-0700"})]))
       assert_equal create_metadata(timekey: timekey), i3.metadata(tag, time, record)
 
       i4 = create_output(:buffered)
@@ -269,15 +300,15 @@ class OutputTest < Test::Unit::TestCase
       assert_equal create_metadata(variables: {key1: "value1", num1: 1}), i5.metadata(tag, time, record)
 
       i6 = create_output(:buffered)
-      i6.configure(config_element('ROOT','',{},[config_element('buffer', 'tag,time', {"timekey_range" => 3600, "timekey_zone" => "-0700"})]))
+      i6.configure(config_element('ROOT','',{},[config_element('buffer', 'tag,time', {"timekey" => 3600, "timekey_zone" => "-0700"})]))
       assert_equal create_metadata(timekey: timekey, tag: tag), i6.metadata(tag, time, record)
 
       i7 = create_output(:buffered)
-      i7.configure(config_element('ROOT','',{},[config_element('buffer', 'tag,num1', {"timekey_range" => 3600, "timekey_zone" => "-0700"})]))
+      i7.configure(config_element('ROOT','',{},[config_element('buffer', 'tag,num1', {"timekey" => 3600, "timekey_zone" => "-0700"})]))
       assert_equal create_metadata(tag: tag, variables: {num1: 1}), i7.metadata(tag, time, record)
 
       i8 = create_output(:buffered)
-      i8.configure(config_element('ROOT','',{},[config_element('buffer', 'time,tag,key1', {"timekey_range" => 3600, "timekey_zone" => "-0700"})]))
+      i8.configure(config_element('ROOT','',{},[config_element('buffer', 'time,tag,key1', {"timekey" => 3600, "timekey_zone" => "-0700"})]))
       assert_equal create_metadata(timekey: timekey, tag: tag, variables: {key1: "value1"}), i8.metadata(tag, time, record)
     end
 
@@ -289,7 +320,7 @@ class OutputTest < Test::Unit::TestCase
       i.start
 
       t = event_time()
-      i.emit('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
+      i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
 
       assert process_called
 
@@ -304,7 +335,7 @@ class OutputTest < Test::Unit::TestCase
       i.start
 
       t = event_time()
-      i.emit('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
+      i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
 
       assert_equal 2, format_called_times
 
@@ -326,7 +357,7 @@ class OutputTest < Test::Unit::TestCase
       assert !i.prefer_buffered_processing
 
       t = event_time()
-      i.emit('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
+      i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
 
       waiting(4){ Thread.pass until process_called }
 
@@ -351,7 +382,7 @@ class OutputTest < Test::Unit::TestCase
       assert i.prefer_buffered_processing
 
       t = event_time()
-      i.emit('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
+      i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
 
       assert !process_called
       assert_equal 2, format_called_times
@@ -368,7 +399,7 @@ class OutputTest < Test::Unit::TestCase
       i.start
 
       t = event_time()
-      i.emit('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
+      i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
       i.force_flush
 
       waiting(4){ Thread.pass until write_called }
@@ -387,7 +418,7 @@ class OutputTest < Test::Unit::TestCase
       i.start
 
       t = event_time()
-      i.emit('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
+      i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
       i.force_flush
 
       waiting(4){ Thread.pass until try_write_called }
@@ -411,7 +442,7 @@ class OutputTest < Test::Unit::TestCase
       assert !i.prefer_delayed_commit
 
       t = event_time()
-      i.emit('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
+      i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
       i.force_flush
 
       waiting(4){ Thread.pass until write_called || try_write_called }
@@ -436,7 +467,7 @@ class OutputTest < Test::Unit::TestCase
       assert i.prefer_delayed_commit
 
       t = event_time()
-      i.emit('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
+      i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
       i.force_flush
 
       waiting(4){ Thread.pass until write_called || try_write_called }
@@ -474,7 +505,7 @@ class OutputTest < Test::Unit::TestCase
       t = event_time()
       es = Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ])
       5.times do
-        @i.emit('tag', es)
+        @i.emit_events('tag', es)
       end
       assert_equal 5, ary.size
 

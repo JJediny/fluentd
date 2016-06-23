@@ -52,6 +52,8 @@ module Fluent
     end
 
     def start
+      super
+
       @loop = Coolio::Loop.new
       @timer = TimerWatcher.new(@emit_interval, true, log, &method(:on_timer))
       @loop.attach(@timer)
@@ -62,6 +64,8 @@ module Fluent
       @loop.watchers.each {|w| w.detach }
       @loop.stop
       @thread.join
+
+      super
     end
 
     def run
@@ -116,6 +120,7 @@ module Fluent
       router.emit(@tag, now, record)
     rescue => e
       log.error "object space failed to emit", error: e, tag: @tag, record: Yajl.dump(record)
+      log.error_backtrace
     end
   end
 end

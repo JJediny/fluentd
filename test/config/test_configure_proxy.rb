@@ -15,7 +15,9 @@ module Fluent::Config
 
           proxy = Fluent::Config::ConfigureProxy.new(:section, type_lookup: @type_lookup)
           assert_equal(:section, proxy.name)
-          assert_equal(:section, proxy.param_name)
+          assert_nil(proxy.param_name)
+          assert_equal(:section, proxy.variable_name)
+          assert_false(proxy.root?)
           assert_nil(proxy.init)
           assert_nil(proxy.required)
           assert_false(proxy.required?)
@@ -27,6 +29,7 @@ module Fluent::Config
           proxy = Fluent::Config::ConfigureProxy.new(:section, param_name: 'sections', init: true, required: false, multi: true, type_lookup: @type_lookup)
           assert_equal(:section, proxy.name)
           assert_equal(:sections, proxy.param_name)
+          assert_equal(:sections, proxy.variable_name)
           assert_false(proxy.required)
           assert_false(proxy.required?)
           assert_true(proxy.multi)
@@ -35,6 +38,7 @@ module Fluent::Config
           proxy = Fluent::Config::ConfigureProxy.new(:section, param_name: :sections, init: false, required: true, multi: false, type_lookup: @type_lookup)
           assert_equal(:section, proxy.name)
           assert_equal(:sections, proxy.param_name)
+          assert_equal(:sections, proxy.variable_name)
           assert_true(proxy.required)
           assert_true(proxy.required?)
           assert_false(proxy.multi)
@@ -51,7 +55,8 @@ module Fluent::Config
         test 'generate a new instance which values are overwritten by the argument object' do
           proxy = p1 = Fluent::Config::ConfigureProxy.new(:section, type_lookup: @type_lookup)
           assert_equal(:section, proxy.name)
-          assert_equal(:section, proxy.param_name)
+          assert_nil(proxy.param_name)
+          assert_equal(:section, proxy.variable_name)
           assert_nil(proxy.init)
           assert_nil(proxy.required)
           assert_false(proxy.required?)
@@ -59,10 +64,11 @@ module Fluent::Config
           assert_true(proxy.multi?)
           assert_nil(proxy.configured_in_section)
 
-          p2 = Fluent::Config::ConfigureProxy.new(:section, param_name: :sections, init: false, required: true, multi: false, type_lookup: @type_lookup)
+          p2 = Fluent::Config::ConfigureProxy.new(:section, init: false, required: true, multi: false, type_lookup: @type_lookup)
           proxy = p1.merge(p2)
           assert_equal(:section, proxy.name)
-          assert_equal(:sections, proxy.param_name)
+          assert_nil(proxy.param_name)
+          assert_equal(:section, proxy.variable_name)
           assert_false(proxy.init)
           assert_false(proxy.init?)
           assert_true(proxy.required)
@@ -73,13 +79,14 @@ module Fluent::Config
         end
 
         test 'does not overwrite with argument object without any specifications of required/multi' do
-          p1 = Fluent::Config::ConfigureProxy.new(:section1, type_lookup: @type_lookup)
+          p1 = Fluent::Config::ConfigureProxy.new(:section1, param_name: :sections, type_lookup: @type_lookup)
           p1.configured_in_section = :subsection
-          p2 = Fluent::Config::ConfigureProxy.new(:section2, param_name: :sections, init: false, required: true, multi: false, type_lookup: @type_lookup)
+          p2 = Fluent::Config::ConfigureProxy.new(:section2, init: false, required: true, multi: false, type_lookup: @type_lookup)
           p3 = Fluent::Config::ConfigureProxy.new(:section3, type_lookup: @type_lookup)
           proxy = p1.merge(p2).merge(p3)
-          assert_equal(:section3, proxy.name)
-          assert_equal(:section3, proxy.param_name)
+          assert_equal(:section1, proxy.name)
+          assert_equal(:sections, proxy.param_name)
+          assert_equal(:sections, proxy.variable_name)
           assert_false(proxy.init)
           assert_false(proxy.init?)
           assert_true(proxy.required)
@@ -87,6 +94,20 @@ module Fluent::Config
           assert_false(proxy.multi)
           assert_false(proxy.multi?)
           assert_equal :subsection, proxy.configured_in_section
+        end
+
+        test "does overwrite name of proxy for root sections which are used for plugins" do
+          # latest plugin class shows actual plugin implementation
+          p1 = Fluent::Config::ConfigureProxy.new('Fluent::Plugin::MyP1'.to_sym, root: true, required: true, multi: false, type_lookup: @type_lookup)
+          p1.config_param :key1, :integer
+
+          p2 = Fluent::Config::ConfigureProxy.new('Fluent::Plugin::MyP2'.to_sym, root: true, required: true, multi: false, type_lookup: @type_lookup)
+          p2.config_param :key2, :string, default: "value2"
+
+          merged = p1.merge(p2)
+
+          assert_equal 'Fluent::Plugin::MyP2'.to_sym, merged.name
+          assert_true merged.root?
         end
       end
 

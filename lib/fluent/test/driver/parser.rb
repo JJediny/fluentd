@@ -14,20 +14,16 @@
 #    limitations under the License.
 #
 
-require 'fluent/plugin/buffer'
-require 'fluent/plugin/buffer/memory_chunk'
+require 'fluent/test/driver/base_owned'
 
 module Fluent
-  module Plugin
-    class MemoryBuffer < Fluent::Plugin::Buffer
-      Plugin.register_buffer('memory2', self)
-
-      def resume
-        return {}, []
-      end
-
-      def generate_chunk(metadata)
-        Fluent::Plugin::Buffer::MemoryChunk.new(metadata)
+  module Test
+    module Driver
+      class Parser < BaseOwned
+        def initialize(klass, **kwargs, &block)
+          super
+          @section_name = "parse"
+        end
       end
     end
   end

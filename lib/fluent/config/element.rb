@@ -32,11 +32,36 @@ module Fluent
         @v1_config = false
         @corresponding_proxies = [] # some plugins use flat parameters, e.g. in_http doesn't provide <format> section for parser.
         @unused_in = false # if this element is not used in plugins, correspoing plugin name and parent element name is set, e.g. [source, plugin class].
+
+        # it's global logger, not plugin logger: deprecated message should be global warning, not plugin level.
+        @logger = defined?($log) ? $log : nil
       end
 
-      attr_accessor :name, :arg, :elements, :unused, :v1_config, :corresponding_proxies, :unused_in
+      attr_accessor :name, :arg, :unused, :v1_config, :corresponding_proxies, :unused_in
+      attr_writer :elements
 
-      def add_element(name, arg='')
+      RESERVED_PARAMETERS_COMPAT = {
+        '@type' => 'type',
+        '@id' => 'id',
+        '@log_level' => 'log_level',
+        '@label' => nil,
+      }
+      RESERVED_PARAMETERS = RESERVED_PARAMETERS_COMPAT.keys
+
+      def elements(*names, name: nil, arg: nil)
+        raise ArgumentError, "name and names are exclusive" if name && !names.empty?
+        raise ArgumentError, "arg is available only with name" if arg && !name
+
+        if name
+          @elements.select{|e| e.name == name && (!arg || e.arg == arg) }
+        elsif !names.empty?
+          @elements.select{|e| names.include?(e.name) }
+        else
+          @elements
+        end
+      end
+
+      def add_element(name, arg = '')
         e = Element.new(name, arg, {}, [])
         e.v1_config = @v1_config
         @elements << e
@@ -63,6 +88,7 @@ module Fluent
         e
       end
 
+      # no code in fluentd uses this method
       def each_element(*names, &block)
         if names.empty?
           @elements.each(&block)
@@ -84,6 +110,12 @@ module Fluent
       def [](key)
         @unused_in = false # ditto
         @unused.delete(key)
+
+        if RESERVED_PARAMETERS.include?(key) && !has_key?(key) && has_key?(RESERVED_PARAMETERS_COMPAT[key])
+          @logger.warn "'#{RESERVED_PARAMETERS_COMPAT[key]}' is deprecated parameter name. use '#{key}' instead." if @logger
+          return self[RESERVED_PARAMETERS_COMPAT[key]]
+        end
+
         super
       end
 
